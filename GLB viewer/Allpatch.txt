@@ -1,0 +1,4868 @@
+PACH-1:
+
+Below is a **best-fit consolidated patch** against the actual repo paths in `viewer/core/app.js` and `viewer/js/pcf2glb/...`. It directly addresses the blocking gap by adding the **Foundation Phase: UI shell + HUD + shortcuts** for the new `pro-glb` tab, while also wiring the required **destroy hook** and keeping the tab immediately after `adv-glb`, which your WI and pass gates require.    
+
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+
+```diff
+diff --git a/viewer/core/app.js b/viewer/core/app.js
+index 1111111..2222222 100644
+--- a/viewer/core/app.js
++++ b/viewer/core/app.js
+@@ -17,6 +17,7 @@ import { renderLinelist } from '../tabs/linelist-tab.js';
+ import { renderPcfGlbExporterPanel } from '../js/pcf2glb/ui/PcfGlbExporterPanel.js';
+ import { renderAdvancedGlbViewerPanel } from '../js/pcf2glb/ui/AdvancedGlbViewerPanel.js';
++import { renderProGlbViewerPanel } from '../js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js';
+
+ const IS_LOCAL_DEV = (() => {
+   const host = (window.location && window.location.hostname || '').toLowerCase();
+@@ -38,6 +39,7 @@ const ALL_TABS = [
+   { id: 'logs',      label: 'Log',         render: renderLogs     },
+   { id: 'glb-export',label: 'Simple GLB Exporter', render: renderPcfGlbExporterPanel },
+   { id: 'adv-glb',   label: 'Advanced GLB Editor', render: renderAdvancedGlbViewerPanel },
++  { id: 'pro-glb',   label: 'Pro GLB Editor', render: renderProGlbViewerPanel },
+   { id: 'debug',     label: 'Debug',       render: renderDebug    },
+ ];
+
+@@ -45,7 +47,7 @@ const TABS = ALL_TABS.filter(t => !t.devOnly || IS_LOCAL_DEV);
+
+ function _isPrintableTabId(tabId) {
+   return tabId !== 'debug' && tabId !== 'logs' && tabId !== 'config';
+ }
+ 
+-let _activeRenderer = null;
++let _activeDestroyFn = null;
+
+ /** Bootstrap the app — called from index.html */
+ export function init() {
+@@ -141,6 +143,14 @@ function _switchTab(tabId) {
+   state.activeTab = tabId;
+   const content = document.getElementById('tab-content');
+   if (!content) return;
++
++  if (typeof _activeDestroyFn === 'function') {
++    try {
++      _activeDestroyFn();
++    } catch (err) {
++      console.warn('[app] outgoing tab destroy failed:', err);
++    }
++    _activeDestroyFn = null;
++  }
+
+   // Update active button
+   document.querySelectorAll('.tab-btn').forEach(btn => {
+@@ -152,7 +162,14 @@ function _switchTab(tabId) {
+   // Render tab
+   const tab = TABS.find(t => t.id === tabId);
+   if (!tab) return;
+-  tab.render(content);
++  content.innerHTML = '';
++  const rendered = tab.render(content);
++
++  if (rendered && typeof rendered.destroy === 'function') {
++    _activeDestroyFn = rendered.destroy;
++  } else if (rendered && typeof rendered.dispose === 'function') {
++    _activeDestroyFn = rendered.dispose;
++  }
+
+   emit('tab-changed', tabId);
+ }
+diff --git a/viewer/js/pcf2glb/advanced/createCameraController.js b/viewer/js/pcf2glb/advanced/createCameraController.js
+index 1111111..2222222 100644
+--- a/viewer/js/pcf2glb/advanced/createCameraController.js
++++ b/viewer/js/pcf2glb/advanced/createCameraController.js
+@@ -9,6 +9,9 @@ export function createCameraController(camera, domElement) {
+ 
+   let currentCenter = new THREE.Vector3();
+   let currentDistance = 100;
++  let homePosition = new THREE.Vector3(100, 100, 100);
++  let homeTarget = new THREE.Vector3(0, 0, 0);
++  let currentPreset = 'ISO';
+
+   return {
+     controls,
+@@ -18,6 +21,9 @@ export function createCameraController(camera, domElement) {
+     fitScene: (sceneRoot) => {
+         if (!sceneRoot || sceneRoot.children.length === 0) return;
+         const box = computeBounds(sceneRoot, false);
++
+         currentDistance = fitPerspectiveToBox(camera, controls, box);
+         currentCenter = box.getCenter(new THREE.Vector3());
++        homePosition.copy(camera.position);
++        homeTarget.copy(controls.target);
+     },
+
+     fitObject: (object3D) => {
+@@ -28,10 +34,20 @@ export function createCameraController(camera, domElement) {
+     },
+
+     resetTarget: () => {
+-        controls.target.copy(currentCenter);
++        controls.target.copy(currentCenter || homeTarget);
++        controls.update();
++    },
++
++    resetHome: () => {
++        camera.position.copy(homePosition);
++        controls.target.copy(homeTarget);
++        camera.lookAt(homeTarget);
+         controls.update();
+     },
+
+     setPresetView: (name) => {
++        currentPreset = name;
+         camera.up.set(0, 1, 0); // Always restore default up
+         if (name === 'ISO') {
+             camera.position.copy(controls.target).add(new THREE.Vector3(1, 1, 1).normalize().multiplyScalar(currentDistance));
+@@ -47,6 +63,12 @@ export function createCameraController(camera, domElement) {
+         }
+         camera.lookAt(controls.target);
+         controls.update();
++    },
++
++    getPresetView: () => currentPreset,
++
++    setDampingFactor: (value) => {
++        controls.dampingFactor = Math.max(0, Number(value) || 0);
+     },
+
+     dispose: () => controls.dispose()
+diff --git a/viewer/js/pcf2glb/advanced/createViewerApp.js b/viewer/js/pcf2glb/advanced/createViewerApp.js
+index 1111111..2222222 100644
+--- a/viewer/js/pcf2glb/advanced/createViewerApp.js
++++ b/viewer/js/pcf2glb/advanced/createViewerApp.js
+@@ -4,7 +4,7 @@ import { createRenderer } from './createRenderer.js';
+ import { createCameraController } from './createCameraController.js';
+ import { createToolbar } from './createToolbar.js';
+ import { buildSceneIndex } from './sceneIndex.js';
+-import { createSelection } from './createSelection.js';
++import { createSelection, resolveInspectableObject } from './createSelection.js';
+ import { createPropertyPanel } from './createPropertyPanel.js';
+ import { createHeatmap } from './createHeatmap.js';
+ import { createSectionBox } from './createSectionBox.js';
+@@ -13,7 +13,7 @@ import { disposeScene } from './disposeRuntime.js';
+ import { createAxisHelper } from './createAxisHelper.js';
+ import { createDebugPanel } from './createDebugPanel.js';
+
+-export function createViewerApp(previewContainer, toolbarContainer, propPanel, propContent, debugLogsContainer) {
++export function createViewerApp(previewContainer, toolbarContainer, propPanel, propContent, debugLogsContainer, options = {}) {
+
+   const scene = new THREE.Scene();
+   scene.background = new THREE.Color(0x222222);
+@@ -24,6 +24,8 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+   let currentRoot = null;
+   let animationId;
+   let sceneIndex = null;
++  let selectionApi = null;
++  let lastSelectionItem = null;
+   let propertyPanel = null;
+   let heatmap = null;
+   let sectionBox = null;
+@@ -51,12 +53,17 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+     pointLight = new THREE.PointLight(0xffffff, 0.5);
+     camera.add(pointLight);
+     scene.add(camera);
+-
+-    toolbar = createToolbar(toolbarContainer, controller);
+-    toolbar.setFitHandler(() => {
+-       if (currentRoot) controller.fitScene(currentRoot);
+-    });
++    
++    if (!options.disableInternalToolbar && toolbarContainer) {
++      toolbar = createToolbar(toolbarContainer, controller);
++      toolbar.setFitHandler(() => {
++         if (currentRoot) controller.fitScene(currentRoot);
++      });
++    } else {
++      toolbar = null;
++    }
+
+     propertyPanel = createPropertyPanel(propPanel, propContent);
+     heatmap = createHeatmap(scene);
+     sectionBox = createSectionBox(scene, renderer);
+@@ -67,24 +74,28 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+     const marqueeZoom = createMarqueeZoom(camera, scene, domElement, controller);
+
+-    toolbar.setSectionHandler((enabled) => {
+-        if (enabled) {
+-            sectionBox.enable();
+-            if (currentRoot) sectionBox.fitToScene(currentRoot);
+-        } else {
+-            sectionBox.disable(currentRoot);
+-        }
+-    });
++    if (toolbar) {
++      toolbar.setSectionHandler((enabled) => {
++          if (enabled) {
++              sectionBox.enable();
++              if (currentRoot) sectionBox.fitToScene(currentRoot);
++          } else {
++              sectionBox.disable(currentRoot);
++          }
++      });
++    }
+
+-    const selection = createSelection(camera, scene, domElement);
+-    selection.onSelect((clickedObj) => {
++    selectionApi = createSelection(camera, scene, domElement);
++    selectionApi.onSelect((clickedObj) => {
+         if (!clickedObj || !sceneIndex) {
+             controller.resetTarget();
+             propertyPanel.hide();
++            lastSelectionItem = null;
++            options.onSelectionChange?.(null, null);
+             return;
+         }
+
+         const id = clickedObj.userData.pcfId || clickedObj.name || clickedObj.uuid;
+         const item = sceneIndex.byId.get(id);
+
+         if (item) {
++            lastSelectionItem = item;
+             controller.fitObject(item.object3D);
+             propertyPanel.show(item);
+
+@@ -92,6 +103,7 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+             if (sectionBox && sectionBox.isEnabled()) {
+                 sectionBox.fitToSelection(item.object3D, currentRoot);
+             }
++            options.onSelectionChange?.(item, clickedObj);
+         }
+     });
+
+@@ -101,6 +113,7 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+       if (axesHelper && axesHelper.handleClick(event)) {
+           // Handled by view helper
+       }
++      options.onPointerUp?.(event);
+     });
+
+     const animate = () => {
+@@ -110,6 +123,7 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+       renderer.render(scene, camera);
+       if (axesHelper) {
+           renderer.autoClear = false;
+           axesHelper.render(renderer);
+       }
++      options.onFrame?.({ camera, scene, currentRoot, selection: lastSelectionItem, renderer });
+     };
+     animate();
+   };
+@@ -137,7 +151,11 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+               debugPanel.log('system', 'info', `Loaded scene with ${sceneIndex.items.length} indexed objects`);
+
+               // Inform toolbar of available properties
+-              const propSet = new Set();
++              const propSet = new Set();
+               currentRoot.traverse(c => {
+                   if (c.isMesh && c.userData) {
+                       Object.keys(c.userData).forEach(k => {
+@@ -145,7 +163,9 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+                       });
+                   }
+               });
+-              toolbar.setProperties(Array.from(propSet).sort());
++              if (toolbar) {
++                toolbar.setProperties(Array.from(propSet).sort());
++              }
+
+-              toolbar.setHeatmapHandler((prop) => {
++              if (toolbar) toolbar.setHeatmapHandler((prop) => {
+                   if (prop === 'default') {
+                       heatmap.clearMetric();
+                       toolbar.updateLegend(null);
+@@ -188,15 +208,54 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+                   });
+                   toolbar.updateLegend(html);
+-              });
++              });
+
++              options.onSceneLoaded?.({ scene: currentRoot, sceneIndex });
+               resolve();
+           }, undefined, reject);
+       });
+     },
++    fitAll: () => {
++      if (currentRoot) controller.fitScene(currentRoot);
++    },
++    home: () => {
++      controller.resetHome();
++    },
++    setPresetView: (name) => {
++      controller.setPresetView(name);
++    },
++    getCamera: () => camera,
++    getController: () => controller,
++    getScene: () => scene,
++    getSceneIndex: () => sceneIndex,
++    getCurrentRoot: () => currentRoot,
++    getCurrentSelection: () => lastSelectionItem,
++    pickAtClient: (clientX, clientY) => {
++      if (!renderer || !camera || !currentRoot) return null;
++
++      const rect = domElement.getBoundingClientRect();
++      const mouse = new THREE.Vector2(
++        ((clientX - rect.left) / rect.width) * 2 - 1,
++        -((clientY - rect.top) / rect.height) * 2 + 1
++      );
++      const raycaster = new THREE.Raycaster();
++      raycaster.setFromCamera(mouse, camera);
++      const intersects = raycaster.intersectObjects(scene.children, true);
++
++      for (const hit of intersects) {
++        if (!hit.object || hit.object.type !== 'Mesh') continue;
++        const resolved = resolveInspectableObject(hit.object);
++        const id = resolved?.userData?.pcfId || resolved?.name || resolved?.uuid;
++        const item = sceneIndex?.byId?.get(id) ?? null;
++        return { hit, object: resolved, item };
++      }
++      return null;
++    },
+     dispose: () => {
+       if (animationId) cancelAnimationFrame(animationId);
+       if (disposeRenderer) disposeRenderer();
+       if (controller) controller.dispose();
++      if (selectionApi) selectionApi.dispose();
++      if (currentRoot) {
++        scene.remove(currentRoot);
++        disposeScene(currentRoot);
++      }
+     }
+   };
+ }
+diff --git a/viewer/js/pcf2glb/settings/Proglb_ViewerSettingsStore.js b/viewer/js/pcf2glb/settings/Proglb_ViewerSettingsStore.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/settings/Proglb_ViewerSettingsStore.js
+@@ -0,0 +1,48 @@
++const STORAGE_KEY = 'proglb.foundation.ui.v1';
++
++export const DEFAULT_SETTINGS = {
++  shortcutsEnabled: true,
++  snapEnabled: true,
++  gridMm: 10,
++  angleDeg: 15,
++  hud: {
++    show: true,
++    showHover: true,
++    showPerf: true,
++  },
++  camera: {
++    dampingFactor: 0.05,
++  }
++};
++
++export function loadSettings() {
++  try {
++    const raw = localStorage.getItem(STORAGE_KEY);
++    if (!raw) return structuredClone(DEFAULT_SETTINGS);
++    return deepMerge(structuredClone(DEFAULT_SETTINGS), JSON.parse(raw));
++  } catch (err) {
++    console.warn('[ProGLB] settings load failed:', err);
++    return structuredClone(DEFAULT_SETTINGS);
++  }
++}
++
++export function saveSettings(next) {
++  try {
++    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
++  } catch (err) {
++    console.warn('[ProGLB] settings save failed:', err);
++  }
++}
++
++export function resetSettings() {
++  localStorage.removeItem(STORAGE_KEY);
++  return structuredClone(DEFAULT_SETTINGS);
++}
++
++function deepMerge(target, source) {
++  for (const key of Object.keys(source || {})) {
++    const value = source[key];
++    if (value && typeof value === 'object' && !Array.isArray(value)) {
++      target[key] = deepMerge(target[key] || {}, value);
++    } else {
++      target[key] = value;
++    }
++  }
++  return target;
++}
+diff --git a/viewer/js/pcf2glb/ui/Proglb_HudOverlay.js b/viewer/js/pcf2glb/ui/Proglb_HudOverlay.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/ui/Proglb_HudOverlay.js
+@@ -0,0 +1,105 @@
++export function createHudOverlay(host) {
++  const root = document.createElement('div');
++  root.style.cssText = `
++    position:absolute; inset:0; pointer-events:none; z-index:8;
++    font-family:Segoe UI, Arial, sans-serif;
++  `;
++
++  const status = document.createElement('div');
++  status.style.cssText = `
++    position:absolute; left:12px; top:12px; display:flex; gap:8px; flex-wrap:wrap;
++    max-width:70%;
++  `;
++
++  const hover = document.createElement('div');
++  hover.style.cssText = `
++    position:absolute; display:none; min-width:200px; max-width:320px;
++    padding:8px 10px; border-radius:8px; background:rgba(10,14,20,0.92);
++    border:1px solid rgba(255,255,255,0.12); color:#dbe8ff; font-size:12px;
++    line-height:1.35; box-shadow:0 10px 24px rgba(0,0,0,0.35);
++  `;
++
++  const footer = document.createElement('div');
++  footer.style.cssText = `
++    position:absolute; left:12px; bottom:12px; display:flex; gap:8px; flex-wrap:wrap;
++  `;
++
++  root.append(status, hover, footer);
++  host.appendChild(root);
++
++  function pill(label, value, accent = '#5ea2ff') {
++    return `
++      <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;
++                  background:rgba(15,22,30,0.88);border:1px solid rgba(255,255,255,0.10);">
++        <span style="color:#91a8c4;font-size:11px;text-transform:uppercase;letter-spacing:.05em;">${escapeHtml(label)}</span>
++        <span style="color:${accent};font-weight:600;font-size:12px;">${escapeHtml(value ?? '—')}</span>
++      </div>
++    `;
++  }
++
++  return {
++    setStatus(state) {
++      status.innerHTML = [
++        pill('Tool', state.tool || 'Select'),
++        pill('Snap', state.snap || 'Off', state.snap && state.snap !== 'Off' ? '#48d597' : '#f08d49'),
++        pill('XYZ', state.xyz || '—'),
++        pill('View', state.view || 'Perspective'),
++      ].join('');
++
++      footer.innerHTML = [
++        pill('Selection', state.selection || 'None', '#ffe082'),
++        pill('FPS', state.fps != null ? String(state.fps) : '—', '#8ce99a'),
++      ].join('');
++    },
++    showHover({ x, y, lines }) {
++      hover.style.display = 'block';
++      hover.style.left = `${x + 16}px`;
++      hover.style.top = `${y + 16}px`;
++      hover.innerHTML = (lines || []).map(line => `<div>${escapeHtml(line)}</div>`).join('');
++    },
++    hideHover() {
++      hover.style.display = 'none';
++      hover.innerHTML = '';
++    },
++    destroy() {
++      root.remove();
++    }
++  };
++}
++
++function escapeHtml(value) {
++  return String(value ?? '')
++    .replace(/&/g, '&amp;')
++    .replace(/</g, '&lt;')
++    .replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;')
++    .replace(/'/g, '&#39;');
++}
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js b/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
+@@ -0,0 +1,96 @@
++export function createShortcutController({ onAction, enabled = true }) {
++  const keymap = new Map([
++    ['1', 'tool:select'],
++    ['2', 'tool:move'],
++    ['3', 'tool:rotate'],
++    ['w', 'tool:move'],
++    ['e', 'tool:rotate'],
++    ['f', 'view:fit'],
++    ['h', 'view:home'],
++    ['i', 'view:iso'],
++    ['t', 'view:top'],
++    ['n', 'view:front'],
++    ['g', 'toggle:snap'],
++    ['escape', 'tool:cancel'],
++    ['delete', 'selection:delete'],
++  ]);
++
++  function onKeyDown(event) {
++    if (!enabled) return;
++    if (shouldIgnore(event.target)) return;
++
++    const key = String(event.key || '').toLowerCase();
++
++    if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
++      event.preventDefault();
++      onAction?.('history:undo', event);
++      return;
++    }
++    if ((event.ctrlKey || event.metaKey) && key === 'z' && event.shiftKey) {
++      event.preventDefault();
++      onAction?.('history:redo', event);
++      return;
++    }
++
++    const action = keymap.get(key);
++    if (!action) return;
++
++    event.preventDefault();
++    onAction?.(action, event);
++  }
++
++  window.addEventListener('keydown', onKeyDown);
++
++  return {
++    setEnabled(value) {
++      enabled = !!value;
++    },
++    destroy() {
++      window.removeEventListener('keydown', onKeyDown);
++    }
++  };
++}
++
++function shouldIgnore(target) {
++  if (!target) return false;
++  const tag = String(target.tagName || '').toLowerCase();
++  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
++  if (target.isContentEditable) return true;
++  return false;
++}
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+@@ -0,0 +1,386 @@
++import { createViewerApp } from '../advanced/createViewerApp.js';
++import { createHudOverlay } from './Proglb_HudOverlay.js';
++import { createShortcutController } from './Proglb_ShortcutController.js';
++import { loadSettings, saveSettings } from '../settings/Proglb_ViewerSettingsStore.js';
++
++export function renderProGlbViewerPanel(container) {
++  const settings = loadSettings();
++
++  container.innerHTML = `
++    <div id="proglb-root" style="height:calc(100vh - 120px);display:grid;grid-template-rows:56px 1fr 220px;background:#0b1118;color:#dbe7f5;border:1px solid #202b36;">
++      <div id="proglb-topbar" style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #202b36;background:linear-gradient(180deg,#141c25,#0f151c);">
++        <button class="btn-proglb" data-action="file:import">Import</button>
++        <button class="btn-proglb" data-action="tool:select">Select</button>
++        <button class="btn-proglb" data-action="tool:move">Move</button>
++        <button class="btn-proglb" data-action="tool:rotate">Rotate</button>
++        <span style="width:1px;height:24px;background:#223140;"></span>
++        <button class="btn-proglb" data-action="view:fit">Fit</button>
++        <button class="btn-proglb" data-action="view:home">Home</button>
++        <button class="btn-proglb" data-action="view:iso">ISO</button>
++        <button class="btn-proglb" data-action="view:top">Top</button>
++        <button class="btn-proglb" data-action="view:front">Front</button>
++        <span style="width:1px;height:24px;background:#223140;"></span>
++        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#9fb3c8;">
++          <input id="proglb-snap-toggle" type="checkbox" ${settings.snapEnabled ? 'checked' : ''}>
++          Snap
++        </label>
++        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#9fb3c8;">
++          Grid
++          <input id="proglb-grid-mm" type="number" min="1" step="1" value="${settings.gridMm}" style="width:64px;background:#0d141b;color:#dbe7f5;border:1px solid #2b3947;border-radius:4px;padding:4px 6px;">
++          mm
++        </label>
++        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#9fb3c8;">
++          Angle
++          <input id="proglb-angle-deg" type="number" min="1" step="1" value="${settings.angleDeg}" style="width:64px;background:#0d141b;color:#dbe7f5;border:1px solid #2b3947;border-radius:4px;padding:4px 6px;">
++          °
++        </label>
++        <div style="margin-left:auto;font-size:11px;color:#7f95ac;letter-spacing:.04em;">PRO GLB Editor</div>
++        <input id="proglb-file-input" type="file" accept=".glb,.gltf" style="display:none;">
++      </div>
++
++      <div style="display:grid;grid-template-columns:280px 1fr 320px;min-height:0;">
++        <aside style="border-right:1px solid #202b36;background:#0f151c;display:grid;grid-template-rows:auto 1fr;">
++          <div id="proglb-left-tabs" style="display:flex;border-bottom:1px solid #202b36;">
++            <button class="btn-left-tab active" data-pane="model">Model</button>
++            <button class="btn-left-tab" data-pane="tools">Tools</button>
++            <button class="btn-left-tab" data-pane="annotations">Annotations</button>
++          </div>
++          <div style="min-height:0;position:relative;">
++            <div class="proglb-left-pane" data-pane="model" style="position:absolute;inset:0;padding:12px;overflow:auto;">
++              <input type="text" placeholder="Search..." style="width:100%;margin-bottom:10px;background:#0b1118;color:#dbe7f5;border:1px solid #263442;border-radius:6px;padding:8px;">
++              <div style="font-size:12px;color:#9fb3c8;margin-bottom:8px;">Model Tree</div>
++              <div id="proglb-model-tree" style="font-size:12px;line-height:1.6;color:#dbe7f5;">
++                <div>• Active Scene</div>
++                <div style="color:#86a0ba;">Load a GLB to populate indexed items.</div>
++              </div>
++            </div>
++            <div class="proglb-left-pane" data-pane="tools" style="display:none;position:absolute;inset:0;padding:12px;overflow:auto;">
++              <div style="font-size:12px;color:#9fb3c8;margin-bottom:10px;">Tool State</div>
++              <div id="proglb-tool-state" style="font-size:12px;line-height:1.8;">
++                <div>Active Tool: <strong id="proglb-active-tool-label">Select</strong></div>
++                <div>Snap: <strong id="proglb-snap-label">${settings.snapEnabled ? 'On' : 'Off'}</strong></div>
++                <div>Grid: <strong id="proglb-grid-label">${settings.gridMm} mm</strong></div>
++                <div>Angle: <strong id="proglb-angle-label">${settings.angleDeg}°</strong></div>
++              </div>
++            </div>
++            <div class="proglb-left-pane" data-pane="annotations" style="display:none;position:absolute;inset:0;padding:12px;overflow:auto;">
++              <div style="font-size:12px;color:#9fb3c8;margin-bottom:8px;">Annotations</div>
++              <div style="font-size:12px;color:#86a0ba;">Foundation phase only. Annotation workflows come later.</div>
++            </div>
++          </div>
++        </aside>
++
++        <main style="position:relative;min-width:0;min-height:0;background:#151c24;">
++          <div id="proglb-preview" style="position:absolute;inset:0;"></div>
++          <div id="proglb-hidden-toolbar" style="display:none;"></div>
++        </main>
++
++        <aside style="border-left:1px solid #202b36;background:#0f151c;display:flex;flex-direction:column;min-height:0;">
++          <div style="padding:12px;border-bottom:1px solid #202b36;font-size:12px;color:#9fb3c8;">Properties</div>
++          <div id="proglb-properties-panel" style="display:none;flex:1;min-height:0;padding:12px;overflow:auto;">
++            <div id="proglb-properties-content"></div>
++          </div>
++          <div id="proglb-empty-props" style="padding:12px;font-size:12px;color:#86a0ba;">Select a component to inspect details.</div>
++        </aside>
++      </div>
++
++      <div style="border-top:1px solid #202b36;background:#0f151c;display:grid;grid-template-rows:40px 1fr;min-height:0;">
++        <div style="display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #202b36;">
++          <div style="font-size:12px;color:#9fb3c8;">Debug Console</div>
++          <div style="font-size:11px;color:#7f95ac;">Foundation phase logs</div>
++        </div>
++        <div id="proglb-debug-logs" style="min-height:0;overflow:auto;padding:10px 12px;font-family:monospace;font-size:11px;background:#0b1118;"></div>
++      </div>
++    </div>
++  `;
++
++  injectLocalStyles();
++
++  const root = container.querySelector('#proglb-root');
++  const preview = container.querySelector('#proglb-preview');
++  const hiddenToolbar = container.querySelector('#proglb-hidden-toolbar');
++  const debugLogs = container.querySelector('#proglb-debug-logs');
++  const propPanel = container.querySelector('#proglb-properties-panel');
++  const propContent = container.querySelector('#proglb-properties-content');
++  const emptyProps = container.querySelector('#proglb-empty-props');
++  const fileInput = container.querySelector('#proglb-file-input');
++  const snapToggle = container.querySelector('#proglb-snap-toggle');
++  const gridInput = container.querySelector('#proglb-grid-mm');
++  const angleInput = container.querySelector('#proglb-angle-deg');
++
++  let activeTool = 'Select';
++  let currentObjectUrl = null;
++  let hoverRaf = 0;
++  let perfRaf = 0;
++  let destroyed = false;
++  let lastFpsSampleTs = performance.now();
++  let frameCounter = 0;
++  let currentFps = 0;
++
++  const hud = createHudOverlay(preview);
++
++  const viewer = createViewerApp(
++    preview,
++    hiddenToolbar,
++    propPanel,
++    propContent,
++    debugLogs,
++    {
++      disableInternalToolbar: true,
++      onSelectionChange: (item) => {
++        if (item) {
++          emptyProps.style.display = 'none';
++          propPanel.style.display = 'block';
++        } else {
++          emptyProps.style.display = 'block';
++          propPanel.style.display = 'none';
++        }
++        updateHud();
++      },
++      onSceneLoaded: ({ sceneIndex }) => {
++        renderModelTree(sceneIndex);
++        logUi('SCENE', 'info', `scene loaded (${sceneIndex?.items?.length ?? 0} indexed objects)`);
++        updateHud();
++      },
++      onFrame: () => {
++        frameCounter += 1;
++      }
++    }
++  );
++
++  const shortcuts = createShortcutController({
++    enabled: settings.shortcutsEnabled,
++    onAction: (action) => {
++      if (action === 'history:undo' || action === 'history:redo' || action === 'selection:delete') {
++        logUi('INPUT', 'warn', `${action} not implemented in foundation phase`);
++        return;
++      }
++
++      const button = root.querySelector(`[data-action="${action}"]`);
++      if (button) {
++        button.click();
++        return;
++      }
++
++      if (action === 'toggle:snap') {
++        snapToggle.checked = !snapToggle.checked;
++        snapToggle.dispatchEvent(new Event('change'));
++        return;
++      }
++
++      if (action === 'tool:cancel') {
++        setActiveTool('Select');
++        logUi('INPUT', 'info', 'tool:cancel -> Select');
++      }
++    }
++  });
++
++  root.querySelectorAll('.btn-left-tab').forEach(btn => {
++    btn.addEventListener('click', () => {
++      root.querySelectorAll('.btn-left-tab').forEach(x => x.classList.toggle('active', x === btn));
++      const pane = btn.dataset.pane;
++      root.querySelectorAll('.proglb-left-pane').forEach(el => {
++        el.style.display = el.dataset.pane === pane ? 'block' : 'none';
++      });
++    });
++  });
++
++  root.querySelectorAll('[data-action]').forEach(btn => {
++    btn.addEventListener('click', async () => {
++      const action = btn.dataset.action;
++      if (action === 'file:import') {
++        fileInput.click();
++        return;
++      }
++      if (action === 'tool:select') return setActiveTool('Select');
++      if (action === 'tool:move') return setActiveTool('Move');
++      if (action === 'tool:rotate') return setActiveTool('Rotate');
++      if (action === 'view:fit') {
++        viewer.fitAll();
++        logUi('CAMERA', 'info', 'fit all');
++        return updateHud();
++      }
++      if (action === 'view:home') {
++        viewer.home();
++        logUi('CAMERA', 'info', 'home');
++        return updateHud();
++      }
++      if (action === 'view:iso') {
++        viewer.setPresetView('ISO');
++        logUi('CAMERA', 'info', 'preset ISO');
++        return updateHud();
++      }
++      if (action === 'view:top') {
++        viewer.setPresetView('TOP');
++        logUi('CAMERA', 'info', 'preset TOP');
++        return updateHud();
++      }
++      if (action === 'view:front') {
++        viewer.setPresetView('FRONT');
++        logUi('CAMERA', 'info', 'preset FRONT');
++        return updateHud();
++      }
++    });
++  });
++
++  fileInput.addEventListener('change', async (event) => {
++    const file = event.target.files?.[0];
++    if (!file) return;
++
++    if (currentObjectUrl) {
++      URL.revokeObjectURL(currentObjectUrl);
++      currentObjectUrl = null;
++    }
++
++    currentObjectUrl = URL.createObjectURL(file);
++    logUi('IMPORT', 'info', `loading ${file.name}`);
++    try {
++      await viewer.loadGLB(currentObjectUrl);
++      logUi('IMPORT', 'info', `loaded ${file.name}`);
++      viewer.fitAll();
++      updateHud();
++    } catch (err) {
++      logUi('IMPORT', 'error', `failed ${file.name}`, { message: err?.message || String(err) });
++    }
++  });
++
++  snapToggle.addEventListener('change', () => {
++    settings.snapEnabled = !!snapToggle.checked;
++    saveSettings(settings);
++    syncToolState();
++    updateHud();
++    logUi('SETTINGS', 'info', `snap ${settings.snapEnabled ? 'on' : 'off'}`);
++  });
++
++  gridInput.addEventListener('change', () => {
++    settings.gridMm = Math.max(1, Number(gridInput.value) || 10);
++    gridInput.value = String(settings.gridMm);
++    saveSettings(settings);
++    syncToolState();
++    logUi('SETTINGS', 'info', `grid ${settings.gridMm} mm`);
++  });
++
++  angleInput.addEventListener('change', () => {
++    settings.angleDeg = Math.max(1, Number(angleInput.value) || 15);
++    angleInput.value = String(settings.angleDeg);
++    saveSettings(settings);
++    syncToolState();
++    logUi('SETTINGS', 'info', `angle ${settings.angleDeg}°`);
++  });
++
++  preview.addEventListener('pointerleave', () => {
++    if (hoverRaf) cancelAnimationFrame(hoverRaf);
++    hud.hideHover();
++  });
++
++  preview.addEventListener('pointermove', (event) => {
++    if (hoverRaf) cancelAnimationFrame(hoverRaf);
++    hoverRaf = requestAnimationFrame(() => {
++      if (destroyed) return;
++      const picked = viewer.pickAtClient(event.clientX, event.clientY);
++      if (!picked || !picked.hit) {
++        hud.hideHover();
++        updateHud();
++        return;
++      }
++
++      const item = picked.item;
++      const point = picked.hit.point;
++      const xyz = `${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}`;
++      hud.showHover({
++        x: event.offsetX,
++        y: event.offsetY,
++        lines: [
++          `${item?.type || picked.object?.userData?.pcfType || 'Mesh'}  ${item?.id || picked.object?.userData?.pcfId || '—'}`,
++          `XYZ ${xyz}`,
++          `${item?.refNo ? `Ref ${item.refNo}` : 'Hover for details'}`
++        ]
++      });
++      updateHud(point);
++    });
++  });
++
++  syncToolState();
++  logUi('SCENE', 'info', 'foundation shell mounted');
++  updateHud();
++  startPerfLoop();
++
++  return {
++    destroy() {
++      destroyed = true;
++      if (hoverRaf) cancelAnimationFrame(hoverRaf);
++      if (perfRaf) cancelAnimationFrame(perfRaf);
++      shortcuts.destroy();
++      hud.destroy();
++      viewer.dispose();
++      if (currentObjectUrl) {
++        URL.revokeObjectURL(currentObjectUrl);
++        currentObjectUrl = null;
++      }
++    }
++  };
++
++  function setActiveTool(label) {
++    activeTool = label;
++    syncToolState();
++    logUi('SETTINGS', 'info', `tool ${label.toLowerCase()}`);
++  }
++
++  function syncToolState() {
++    const toolLabel = root.querySelector('#proglb-active-tool-label');
++    const snapLabel = root.querySelector('#proglb-snap-label');
++    const gridLabel = root.querySelector('#proglb-grid-label');
++    const angleLabel = root.querySelector('#proglb-angle-label');
++    if (toolLabel) toolLabel.textContent = activeTool;
++    if (snapLabel) snapLabel.textContent = settings.snapEnabled ? 'On' : 'Off';
++    if (gridLabel) gridLabel.textContent = `${settings.gridMm} mm`;
++    if (angleLabel) angleLabel.textContent = `${settings.angleDeg}°`;
++    updateHud();
++  }
++
++  function updateHud(point = null) {
++    const selection = viewer.getCurrentSelection();
++    const controller = viewer.getController();
++    const view = controller?.getPresetView?.() || 'ISO';
++    const xyz = point ? `${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}` : '—';
++
++    hud.setStatus({
++      tool: activeTool,
++      snap: settings.snapEnabled ? `On · ${settings.gridMm}mm` : 'Off',
++      xyz,
++      view,
++      fps: currentFps,
++      selection: selection?.id || selection?.refNo || 'None',
++    });
++  }
++
++  function startPerfLoop() {
++    function tick(ts) {
++      if (destroyed) return;
++      const dt = ts - lastFpsSampleTs;
++      if (dt >= 500) {
++        currentFps = Math.round((frameCounter * 1000) / dt);
++        frameCounter = 0;
++        lastFpsSampleTs = ts;
++        updateHud();
++      }
++      perfRaf = requestAnimationFrame(tick);
++    }
++    perfRaf = requestAnimationFrame(tick);
++  }
++
++  function renderModelTree(sceneIndex) {
++    const tree = root.querySelector('#proglb-model-tree');
++    if (!tree) return;
++    const items = sceneIndex?.items || [];
++    if (!items.length) {
++      tree.innerHTML = '<div style="color:#86a0ba;">Load a GLB to populate indexed items.</div>';
++      return;
++    }
++    tree.innerHTML = items.slice(0, 60).map(item => `
++      <div style="padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
++        • ${escapeHtml(item.type || 'ITEM')} <span style="color:#86a0ba;">${escapeHtml(item.id || item.refNo || '—')}</span>
++      </div>
++    `).join('');
++  }
++
++  function logUi(channel, level, message, payload) {
++    const color =
++      level === 'error' ? '#ff6b6b' :
++      level === 'warn' ? '#ffd166' :
++      level === 'info' ? '#74c0fc' : '#94d2bd';
++    const line = document.createElement('div');
++    line.style.cssText = 'padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05);';
++    line.innerHTML = `<span style="color:${color}">[${level.toUpperCase()}]</span> <span style="color:#8ea3bb">[${channel}]</span> ${escapeHtml(message)}${payload ? ` <span style="color:#6d8198">${escapeHtml(JSON.stringify(payload))}</span>` : ''}`;
++    debugLogs.prepend(line);
++    while (debugLogs.childElementCount > 120) debugLogs.lastElementChild?.remove();
++  }
++}
++
++function escapeHtml(value) {
++  return String(value ?? '')
++    .replace(/&/g, '&amp;')
++    .replace(/</g, '&lt;')
++    .replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;')
++    .replace(/'/g, '&#39;');
++}
++
++let injected = false;
++function injectLocalStyles() {
++  if (injected) return;
++  injected = true;
++  const style = document.createElement('style');
++  style.textContent = `
++    .btn-proglb, .btn-left-tab {
++      background:#16202b;
++      color:#dbe7f5;
++      border:1px solid #273645;
++      border-radius:6px;
++      padding:7px 10px;
++      font-size:12px;
++      cursor:pointer;
++    }
++    .btn-proglb:hover, .btn-left-tab:hover { background:#1c2935; }
++    .btn-left-tab {
++      flex:1;
++      border-radius:0;
++      border:0;
++      border-right:1px solid #202b36;
++      background:#111821;
++      padding:10px 12px;
++    }
++    .btn-left-tab.active {
++      background:#182432;
++      color:#ffffff;
++      font-weight:600;
++    }
++  `;
++  document.head.appendChild(style);
++}
+```
+
+This patch gives you a **commit-oriented foundation** for the missing work:
+
+* professional **top toolbar / left dock / canvas / right dock / bottom debug dock**
+* **HUD overlay** with tool, snap, XYZ, selection, FPS
+* **hover details** near cursor
+* **keyboard shortcuts** with input-field safety
+* `pro-glb` tab wiring after `adv-glb`
+* outgoing tab **destroy cleanup** so object URLs and listeners are not leaked.  
+
+Three important notes:
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+
+* this patch is intentionally scoped to the **foundation shell** and does **not** add the later export/annotation/redline work
+* it keeps your current viewer runtime mostly intact and wraps it with the requested shell/HUD/shortcut layer, which matches the critique you wanted to address.  
+
+PATCH-2:
+
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+Apply this as the **next incremental patch after the foundation shell patch**. It is specifically aimed at the camera requirements you called out: **true orthographic/perspective switching, stable aligned views, fit/home recovery, resize-safe frustums, and camera-aware shortcut wiring**. That directly extends the existing Pro GLB Editor WI and the camera pass-test expectations around explicit camera actions, fit/reset, aligned views, and ortho/persp behavior.  
+
+```diff
+diff --git a/viewer/js/pcf2glb/advanced/createCameraController.js b/viewer/js/pcf2glb/advanced/createCameraController.js
+index 2222222..3333333 100644
+--- a/viewer/js/pcf2glb/advanced/createCameraController.js
++++ b/viewer/js/pcf2glb/advanced/createCameraController.js
+@@ -1,72 +1,223 @@
+ import * as THREE from 'three';
+ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+-import { fitPerspectiveToBox, computeBounds } from './fitBounds.js';
++import { computeBounds } from './fitBounds.js';
+
+ export function createCameraController(camera, domElement) {
+-  const controls = new OrbitControls(camera, domElement);
++  const perspectiveCamera = camera;
++  const initialAspect = Math.max(1, domElement.clientWidth / Math.max(1, domElement.clientHeight));
++  perspectiveCamera.aspect = initialAspect;
++  perspectiveCamera.updateProjectionMatrix();
++
++  const orthoCamera = new THREE.OrthographicCamera(
++    -100 * initialAspect,
++     100 * initialAspect,
++     100,
++    -100,
++    perspectiveCamera.near || 0.1,
++    perspectiveCamera.far || 10000000
++  );
++  orthoCamera.position.copy(perspectiveCamera.position);
++  orthoCamera.quaternion.copy(perspectiveCamera.quaternion);
++  orthoCamera.up.copy(perspectiveCamera.up);
++  orthoCamera.updateProjectionMatrix();
++
++  const controls = new OrbitControls(perspectiveCamera, domElement);
+   controls.enableDamping = true;
+   controls.dampingFactor = 0.05;
+
+   let currentCenter = new THREE.Vector3();
+   let currentDistance = 100;
++  let currentBounds = null;
+   let homePosition = new THREE.Vector3(100, 100, 100);
+   let homeTarget = new THREE.Vector3(0, 0, 0);
+   let currentPreset = 'ISO';
++  let projectionMode = 'PERSPECTIVE';
++  let activeCamera = perspectiveCamera;
++  let homeMode = 'PERSPECTIVE';
+
+   return {
+     controls,
+
+     fitScene: (sceneRoot) => {
+-        if (!sceneRoot || sceneRoot.children.length === 0) return;
+-        const box = computeBounds(sceneRoot, false);
+-        currentDistance = fitPerspectiveToBox(camera, controls, box);
+-        currentCenter = box.getCenter(new THREE.Vector3());
+-        homePosition.copy(camera.position);
+-        homeTarget.copy(controls.target);
++        if (!sceneRoot || sceneRoot.children.length === 0) return;
++        const box = computeBounds(sceneRoot, false);
++        fitBox(box);
+     },
+
+     fitObject: (object3D) => {
+-        if (!object3D) return;
+-        const box = computeBounds(object3D, false);
+-        currentDistance = fitPerspectiveToBox(camera, controls, box);
+-        currentCenter = box.getCenter(new THREE.Vector3());
++        if (!object3D) return;
++        const box = computeBounds(object3D, false);
++        fitBox(box);
+     },
+
+     resetTarget: () => {
+-        controls.target.copy(currentCenter || homeTarget);
+-        controls.update();
++        controls.target.copy(currentCenter || homeTarget);
++        controls.update();
+     },
+
+     resetHome: () => {
+-        camera.position.copy(homePosition);
+-        controls.target.copy(homeTarget);
+-        camera.lookAt(homeTarget);
+-        controls.update();
++        setProjection(homeMode);
++        activeCamera.position.copy(homePosition);
++        controls.target.copy(homeTarget);
++        activeCamera.lookAt(homeTarget);
++        syncInactiveCamera();
++        controls.update();
+     },
+
+     setPresetView: (name) => {
+-        currentPreset = name;
+-        camera.up.set(0, 1, 0); // Always restore default up
+-        if (name === 'ISO') {
+-            camera.position.copy(controls.target).add(new THREE.Vector3(1, 1, 1).normalize().multiplyScalar(currentDistance));
+-        } else if (name === 'TOP') {
+-            camera.position.copy(controls.target).add(new THREE.Vector3(0, 1, 0).multiplyScalar(currentDistance));
+-        } else if (name === 'FRONT') {
+-            camera.position.copy(controls.target).add(new THREE.Vector3(0, 0, 1).multiplyScalar(currentDistance));
+-        } else if (name === 'RIGHT') {
+-            camera.position.copy(controls.target).add(new THREE.Vector3(1, 0, 0).multiplyScalar(currentDistance));
+-        }
+-        camera.lookAt(controls.target);
+-        controls.update();
++        currentPreset = String(name || 'ISO').toUpperCase();
++        const center = (currentCenter && Number.isFinite(currentCenter.x))
++          ? currentCenter.clone()
++          : controls.target.clone();
++        const distance = Math.max(1, currentDistance || activeCamera.position.distanceTo(controls.target) || 100);
++
++        let dir = new THREE.Vector3(1, 1, 1);
++        let up = new THREE.Vector3(0, 1, 0);
++
++        switch (currentPreset) {
++          case 'TOP':
++            dir.set(0, 1, 0);
++            up.set(0, 0, -1);
++            break;
++          case 'BOTTOM':
++            dir.set(0, -1, 0);
++            up.set(0, 0, 1);
++            break;
++          case 'FRONT':
++            dir.set(0, 0, 1);
++            up.set(0, 1, 0);
++            break;
++          case 'BACK':
++            dir.set(0, 0, -1);
++            up.set(0, 1, 0);
++            break;
++          case 'LEFT':
++            dir.set(-1, 0, 0);
++            up.set(0, 1, 0);
++            break;
++          case 'RIGHT':
++            dir.set(1, 0, 0);
++            up.set(0, 1, 0);
++            break;
++          case 'ISO':
++          default:
++            dir.set(1, 1, 1).normalize();
++            up.set(0, 1, 0);
++            break;
++        }
++
++        controls.target.copy(center);
++        activeCamera.position.copy(center).add(dir.normalize().multiplyScalar(distance));
++        activeCamera.up.copy(up);
++        activeCamera.lookAt(center);
++        syncInactiveCamera();
++        controls.update();
+     },
+
+     getPresetView: () => currentPreset,
+
+     setDampingFactor: (value) => {
+         controls.dampingFactor = Math.max(0, Number(value) || 0);
+     },
+
+-    dispose: () => controls.dispose()
++    setProjection,
++    toggleProjection: () => setProjection(projectionMode === 'PERSPECTIVE' ? 'ORTHOGRAPHIC' : 'PERSPECTIVE'),
++    getProjectionMode: () => projectionMode,
++    isOrthographic: () => projectionMode === 'ORTHOGRAPHIC',
++    getActiveCamera: () => activeCamera,
++    setPerspectiveFov: (value) => {
++      const next = Math.max(20, Math.min(120, Number(value) || perspectiveCamera.fov));
++      perspectiveCamera.fov = next;
++      perspectiveCamera.updateProjectionMatrix();
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++    },
++    onResize: (width, height) => {
++      const safeW = Math.max(1, width || domElement.clientWidth || 1);
++      const safeH = Math.max(1, height || domElement.clientHeight || 1);
++      perspectiveCamera.aspect = safeW / safeH;
++      perspectiveCamera.updateProjectionMatrix();
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++    },
++    dispose: () => controls.dispose()
+   };
++
++  function fitBox(box) {
++    if (!box || box.isEmpty()) return;
++
++    currentBounds = box.clone();
++    currentCenter = box.getCenter(new THREE.Vector3());
++
++    const size = box.getSize(new THREE.Vector3());
++    const maxDim = Math.max(size.x, size.y, size.z, 1);
++    const fovRad = THREE.MathUtils.degToRad(perspectiveCamera.fov);
++    const fitDistance = ((maxDim * 0.5) / Math.tan(fovRad * 0.5)) * 1.35;
++    currentDistance = Math.max(1, fitDistance);
++
++    const currentDir = activeCamera.position.clone().sub(controls.target);
++    if (currentDir.lengthSq() < 1e-6) currentDir.set(1, 1, 1);
++    currentDir.normalize();
++
++    controls.target.copy(currentCenter);
++    activeCamera.position.copy(currentCenter).add(currentDir.multiplyScalar(currentDistance));
++
++    const near = Math.max(0.1, currentDistance / 1000);
++    const far = Math.max(1000, currentDistance * 20 + maxDim * 10);
++    perspectiveCamera.near = near;
++    perspectiveCamera.far = far;
++    perspectiveCamera.updateProjectionMatrix();
++    orthoCamera.near = near;
++    orthoCamera.far = far;
++    updateOrthoFrustum(currentDistance);
++
++    homePosition.copy(activeCamera.position);
++    homeTarget.copy(controls.target);
++    homeMode = projectionMode;
++    syncInactiveCamera();
++    controls.update();
++  }
++
++  function setProjection(mode) {
++    const next = String(mode || 'PERSPECTIVE').toUpperCase();
++    if (next === projectionMode) return;
++
++    if (next === 'ORTHOGRAPHIC') {
++      orthoCamera.position.copy(activeCamera.position);
++      orthoCamera.quaternion.copy(activeCamera.quaternion);
++      orthoCamera.up.copy(activeCamera.up);
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++      activeCamera = orthoCamera;
++      controls.object = orthoCamera;
++      projectionMode = 'ORTHOGRAPHIC';
++    } else {
++      perspectiveCamera.position.copy(activeCamera.position);
++      perspectiveCamera.quaternion.copy(activeCamera.quaternion);
++      perspectiveCamera.up.copy(activeCamera.up);
++      perspectiveCamera.updateProjectionMatrix();
++      activeCamera = perspectiveCamera;
++      controls.object = perspectiveCamera;
++      projectionMode = 'PERSPECTIVE';
++    }
++
++    controls.update();
++  }
++
++  function updateOrthoFrustum(distance) {
++    const width = Math.max(1, domElement.clientWidth || 1);
++    const height = Math.max(1, domElement.clientHeight || 1);
++    const aspect = width / height;
++    const fovRad = THREE.MathUtils.degToRad(perspectiveCamera.fov);
++    const halfHeight = Math.max(1, distance * Math.tan(fovRad * 0.5));
++
++    orthoCamera.left = -halfHeight * aspect;
++    orthoCamera.right = halfHeight * aspect;
++    orthoCamera.top = halfHeight;
++    orthoCamera.bottom = -halfHeight;
++    orthoCamera.updateProjectionMatrix();
++  }
++
++  function syncInactiveCamera() {
++    if (activeCamera !== perspectiveCamera) {
++      perspectiveCamera.position.copy(activeCamera.position);
++      perspectiveCamera.quaternion.copy(activeCamera.quaternion);
++      perspectiveCamera.up.copy(activeCamera.up);
++      perspectiveCamera.updateProjectionMatrix();
++    }
++    if (activeCamera !== orthoCamera) {
++      orthoCamera.position.copy(activeCamera.position);
++      orthoCamera.quaternion.copy(activeCamera.quaternion);
++      orthoCamera.up.copy(activeCamera.up);
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++    }
++  }
+ }
+diff --git a/viewer/js/pcf2glb/advanced/createSelection.js b/viewer/js/pcf2glb/advanced/createSelection.js
+index 1111111..2222222 100644
+--- a/viewer/js/pcf2glb/advanced/createSelection.js
++++ b/viewer/js/pcf2glb/advanced/createSelection.js
+@@ -1,10 +1,12 @@
+ import * as THREE from 'three';
+
+-export function createSelection(camera, scene, domElement) {
++export function createSelection(cameraOrGetter, scene, domElement) {
++  const getCamera = typeof cameraOrGetter === 'function' ? cameraOrGetter : () => cameraOrGetter;
+   const raycaster = new THREE.Raycaster();
+   const mouse = new THREE.Vector2();
+   let selectHandler = null;
+
+   function onPointerDown(event) {
++    const camera = getCamera();
+     const rect = domElement.getBoundingClientRect();
+     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+@@ -28,6 +30,16 @@ export function createSelection(camera, scene, domElement) {
+     onSelect(cb) {
+       selectHandler = cb;
+     },
++    dispose() {
++      domElement.removeEventListener('pointerdown', onPointerDown);
++    }
++  };
++}
++
++export function resolveInspectableObject(object) {
++  let cursor = object;
++  while (cursor && !cursor.userData?.pcfId && cursor.parent) {
++    cursor = cursor.parent;
++  }
++  return {
+-    dispose() {
+-      domElement.removeEventListener('pointerdown', onPointerDown);
+-    }
++    ...cursor
+   };
+ }
+diff --git a/viewer/js/pcf2glb/advanced/createMarqueeZoom.js b/viewer/js/pcf2glb/advanced/createMarqueeZoom.js
+index 1111111..2222222 100644
+--- a/viewer/js/pcf2glb/advanced/createMarqueeZoom.js
++++ b/viewer/js/pcf2glb/advanced/createMarqueeZoom.js
+@@ -1,6 +1,7 @@
+ import * as THREE from 'three';
+
+-export function createMarqueeZoom(camera, scene, domElement, controller) {
++export function createMarqueeZoom(cameraOrGetter, scene, domElement, controller) {
++  const getCamera = typeof cameraOrGetter === 'function' ? cameraOrGetter : () => cameraOrGetter;
+   const raycaster = new THREE.Raycaster();
+
+   function zoomToRect(startNdc, endNdc) {
+@@ -8,7 +9,7 @@ export function createMarqueeZoom(camera, scene, domElement, controller) {
+     const center = new THREE.Vector2(
+       (startNdc.x + endNdc.x) / 2,
+       (startNdc.y + endNdc.y) / 2
+     );
+-    raycaster.setFromCamera(center, camera);
++    raycaster.setFromCamera(center, getCamera());
+
+     // ... existing logic unchanged ...
+   }
+diff --git a/viewer/js/pcf2glb/advanced/createViewerApp.js b/viewer/js/pcf2glb/advanced/createViewerApp.js
+index 2222222..4444444 100644
+--- a/viewer/js/pcf2glb/advanced/createViewerApp.js
++++ b/viewer/js/pcf2glb/advanced/createViewerApp.js
+@@ -24,6 +24,7 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+   let currentRoot = null;
+   let animationId;
+   let sceneIndex = null;
++  let resizeObserver = null;
+   let selectionApi = null;
+   let lastSelectionItem = null;
+   let propertyPanel = null;
+@@ -57,6 +58,8 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+     if (!options.disableInternalToolbar && toolbarContainer) {
+       toolbar = createToolbar(toolbarContainer, controller);
+       toolbar.setFitHandler(() => {
+          if (currentRoot) controller.fitScene(currentRoot);
+       });
+     } else {
+       toolbar = null;
+@@ -74,7 +77,7 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+       });
+     }
+
+-    selectionApi = createSelection(camera, scene, domElement);
++    selectionApi = createSelection(() => controller.getActiveCamera(), scene, domElement);
+     selectionApi.onSelect((clickedObj) => {
+         if (!clickedObj || !sceneIndex) {
+             controller.resetTarget();
+@@ -103,7 +106,7 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+       }
+     });
+
+-    const marqueeZoom = createMarqueeZoom(camera, scene, domElement, controller);
++    const marqueeZoom = createMarqueeZoom(() => controller.getActiveCamera(), scene, domElement, controller);
+
+     domElement.addEventListener('pointerup', (event) => {
+       if (axesHelper && axesHelper.handleClick(event)) {
+@@ -117,7 +120,13 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+       frameCounter += 1;
+       controller.controls.update();
+-      renderer.render(scene, camera);
++      renderer.render(scene, controller.getActiveCamera());
+       if (axesHelper) {
+           renderer.autoClear = false;
+           axesHelper.render(renderer);
++          renderer.autoClear = true;
+       }
+       options.onFrame?.({ camera, scene, currentRoot, selection: lastSelectionItem, renderer });
+     };
+     animate();
++
++    resizeObserver = new ResizeObserver((entries) => {
++      const rect = entries?.[0]?.contentRect;
++      controller.onResize(rect?.width || previewContainer.clientWidth, rect?.height || previewContainer.clientHeight);
++    });
++    resizeObserver.observe(previewContainer);
+   };
+
+@@ -214,6 +223,12 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+     setPresetView: (name) => {
+       controller.setPresetView(name);
+     },
++    setProjection: (mode) => {
++      controller.setProjection(mode);
++    },
++    toggleProjection: () => {
++      controller.toggleProjection();
++    },
++    getProjectionMode: () => controller.getProjectionMode(),
+     getCamera: () => camera,
+     getController: () => controller,
+     getScene: () => scene,
+@@ -223,7 +238,7 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+       if (!renderer || !camera || !currentRoot) return null;
+
+       const rect = domElement.getBoundingClientRect();
+       const mouse = new THREE.Vector2(
+         ((clientX - rect.left) / rect.width) * 2 - 1,
+         -((clientY - rect.top) / rect.height) * 2 + 1
+       );
+       const raycaster = new THREE.Raycaster();
+-      raycaster.setFromCamera(mouse, camera);
++      raycaster.setFromCamera(mouse, controller.getActiveCamera());
+       const intersects = raycaster.intersectObjects(scene.children, true);
+
+       for (const hit of intersects) {
+@@ -245,10 +260,12 @@ export function createViewerApp(previewContainer, toolbarContainer, propPanel, p
+     dispose: () => {
+       if (animationId) cancelAnimationFrame(animationId);
+       if (disposeRenderer) disposeRenderer();
+       if (controller) controller.dispose();
+       if (selectionApi) selectionApi.dispose();
++      if (resizeObserver) resizeObserver.disconnect();
+       if (currentRoot) {
+         scene.remove(currentRoot);
+         disposeScene(currentRoot);
+       }
+     }
+   };
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js b/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
+index 1111111..2222222 100644
+--- a/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
++++ b/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
+@@ -8,10 +8,12 @@ export function createShortcutController({ onAction, enabled = true }) {
+     ['w', 'tool:move'],
+     ['e', 'tool:rotate'],
+     ['f', 'view:fit'],
+     ['h', 'view:home'],
+     ['i', 'view:iso'],
+-    ['t', 'view:top'],
+-    ['n', 'view:front'],
++    ['o', 'view:ortho'],
++    ['p', 'view:persp'],
+     ['g', 'toggle:snap'],
+     ['escape', 'tool:cancel'],
+     ['delete', 'selection:delete'],
+   ]);
+@@ -20,6 +22,17 @@ export function createShortcutController({ onAction, enabled = true }) {
+     if (!enabled) return;
+     if (shouldIgnore(event.target)) return;
+
+     const key = String(event.key || '').toLowerCase();
++
++    if (event.shiftKey && key === 't') { event.preventDefault(); onAction?.('view:top', event); return; }
++    if (event.shiftKey && key === 'f') { event.preventDefault(); onAction?.('view:front', event); return; }
++    if (event.shiftKey && key === 'b') { event.preventDefault(); onAction?.('view:back', event); return; }
++    if (event.shiftKey && key === 'l') { event.preventDefault(); onAction?.('view:left', event); return; }
++    if (event.shiftKey && key === 'r') { event.preventDefault(); onAction?.('view:right', event); return; }
++    if (event.shiftKey && key === 'd') { event.preventDefault(); onAction?.('view:bottom', event); return; }
++
+     if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
+       event.preventDefault();
+       onAction?.('history:undo', event);
+       return;
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+index 2222222..5555555 100644
+--- a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
++++ b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+@@ -13,6 +13,7 @@ export function renderProGlbViewerPanel(container) {
+   let destroyed = false;
+   let lastFpsSampleTs = performance.now();
+   let frameCounter = 0;
+   let currentFps = 0;
++  let currentProjectionMode = 'PERSPECTIVE';
+
+   const hud = createHudOverlay(preview);
+
+@@ -31,9 +32,16 @@ export function renderProGlbViewerPanel(container) {
+         <button class="btn-proglb" data-action="view:fit">Fit</button>
+         <button class="btn-proglb" data-action="view:home">Home</button>
++        <button class="btn-proglb" data-action="view:persp">Perspective</button>
++        <button class="btn-proglb" data-action="view:ortho">Orthographic</button>
+         <button class="btn-proglb" data-action="view:iso">ISO</button>
+         <button class="btn-proglb" data-action="view:top">Top</button>
+         <button class="btn-proglb" data-action="view:front">Front</button>
++        <button class="btn-proglb" data-action="view:back">Back</button>
++        <button class="btn-proglb" data-action="view:left">Left</button>
++        <button class="btn-proglb" data-action="view:right">Right</button>
++        <button class="btn-proglb" data-action="view:bottom">Bottom</button>
+         <span style="width:1px;height:24px;background:#223140;"></span>
+         <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#9fb3c8;">
+           <input id="proglb-snap-toggle" type="checkbox" ${settings.snapEnabled ? 'checked' : ''}>
+           Snap
+@@ -65,7 +73,7 @@ export function renderProGlbViewerPanel(container) {
+                 <div>Active Tool: <strong id="proglb-active-tool-label">Select</strong></div>
+                 <div>Snap: <strong id="proglb-snap-label">${settings.snapEnabled ? 'On' : 'Off'}</strong></div>
+                 <div>Grid: <strong id="proglb-grid-label">${settings.gridMm} mm</strong></div>
+                 <div>Angle: <strong id="proglb-angle-label">${settings.angleDeg}°</strong></div>
++                <div>Projection: <strong id="proglb-proj-label">Perspective</strong></div>
+               </div>
+             </div>
+             <div class="proglb-left-pane" data-pane="annotations" style="display:none;position:absolute;inset:0;padding:12px;overflow:auto;">
+@@ -148,6 +156,20 @@ export function renderProGlbViewerPanel(container) {
+         logUi('CAMERA', 'info', 'home');
+         return updateHud();
+       }
++      if (action === 'view:persp') {
++        viewer.setProjection('PERSPECTIVE');
++        currentProjectionMode = viewer.getProjectionMode();
++        logUi('CAMERA', 'info', 'projection perspective');
++        return updateHud();
++      }
++      if (action === 'view:ortho') {
++        viewer.setProjection('ORTHOGRAPHIC');
++        currentProjectionMode = viewer.getProjectionMode();
++        logUi('CAMERA', 'info', 'projection orthographic');
++        return updateHud();
++      }
+       if (action === 'view:iso') {
+         viewer.setPresetView('ISO');
+         logUi('CAMERA', 'info', 'preset ISO');
+         return updateHud();
+       }
+@@ -158,6 +180,26 @@ export function renderProGlbViewerPanel(container) {
+         viewer.setPresetView('FRONT');
+         logUi('CAMERA', 'info', 'preset FRONT');
+         return updateHud();
++      }
++      if (action === 'view:back') {
++        viewer.setPresetView('BACK');
++        logUi('CAMERA', 'info', 'preset BACK');
++        return updateHud();
++      }
++      if (action === 'view:left') {
++        viewer.setPresetView('LEFT');
++        logUi('CAMERA', 'info', 'preset LEFT');
++        return updateHud();
++      }
++      if (action === 'view:right') {
++        viewer.setPresetView('RIGHT');
++        logUi('CAMERA', 'info', 'preset RIGHT');
++        return updateHud();
++      }
++      if (action === 'view:bottom') {
++        viewer.setPresetView('BOTTOM');
++        logUi('CAMERA', 'info', 'preset BOTTOM');
++        return updateHud();
+       }
+     });
+   });
+@@ -178,6 +220,7 @@ export function renderProGlbViewerPanel(container) {
+     try {
+       await viewer.loadGLB(currentObjectUrl);
+       logUi('IMPORT', 'info', `loaded ${file.name}`);
+       viewer.fitAll();
++      currentProjectionMode = viewer.getProjectionMode();
+       updateHud();
+     } catch (err) {
+       logUi('IMPORT', 'error', `failed ${file.name}`, { message: err?.message || String(err) });
+@@ -213,6 +256,8 @@ export function renderProGlbViewerPanel(container) {
+   syncToolState();
+   logUi('SCENE', 'info', 'foundation shell mounted');
+   updateHud();
++  currentProjectionMode = viewer.getProjectionMode();
++  updateProjectionState();
+   startPerfLoop();
+
+   return {
+@@ -247,6 +292,7 @@ export function renderProGlbViewerPanel(container) {
+     if (toolLabel) toolLabel.textContent = activeTool;
+     if (snapLabel) snapLabel.textContent = settings.snapEnabled ? 'On' : 'Off';
+     if (gridLabel) gridLabel.textContent = `${settings.gridMm} mm`;
+     if (angleLabel) angleLabel.textContent = `${settings.angleDeg}°`;
++    updateProjectionState();
+     updateHud();
+   }
+
+@@ -254,13 +300,25 @@ export function renderProGlbViewerPanel(container) {
+     const selection = viewer.getCurrentSelection();
+     const controller = viewer.getController();
+     const view = controller?.getPresetView?.() || 'ISO';
++    currentProjectionMode = controller?.getProjectionMode?.() || currentProjectionMode || 'PERSPECTIVE';
+     const xyz = point ? `${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}` : '—';
+
+     hud.setStatus({
+       tool: activeTool,
+       snap: settings.snapEnabled ? `On · ${settings.gridMm}mm` : 'Off',
+       xyz,
+-      view,
++      view: `${currentProjectionMode === 'ORTHOGRAPHIC' ? 'Ortho' : 'Persp'} · ${view}`,
+       fps: currentFps,
+       selection: selection?.id || selection?.refNo || 'None',
+     });
++  }
++
++  function updateProjectionState() {
++    const projLabel = root.querySelector('#proglb-proj-label');
++    if (projLabel) {
++      projLabel.textContent = currentProjectionMode === 'ORTHOGRAPHIC' ? 'Orthographic' : 'Perspective';
++    }
++    root.querySelectorAll('[data-action="view:persp"], [data-action="view:ortho"]').forEach(btn => {
++      const isActive = (btn.dataset.action === 'view:persp' && currentProjectionMode === 'PERSPECTIVE')
++        || (btn.dataset.action === 'view:ortho' && currentProjectionMode === 'ORTHOGRAPHIC');
++      btn.style.outline = isActive ? '2px solid #5ea2ff' : '';
++    });
+   }
+```
+
+What this patch adds:
+
+* **real dual projection support** with `Perspective` and `Orthographic`
+* **stable aligned presets**: `ISO`, `TOP`, `BOTTOM`, `FRONT`, `BACK`, `LEFT`, `RIGHT`
+* **resize-safe ortho frustum recompute**
+* **home recovery** that restores both pose and projection mode
+* **camera-aware selection and marquee zoom**
+* **toolbar buttons + shortcuts** for projection and aligned views
+* **HUD / left-dock projection state** updates
+
+Recommended smoke test after applying:
+
+1. Load a GLB
+2. `Fit`
+3. switch `Perspective -> Orthographic -> Perspective`
+4. run `Top / Front / Right / Back / Left / Bottom / ISO`
+5. hit `Home`
+6. repeat 10 times
+7. confirm selection, hover, and HUD still work
+8. confirm no blank render and no red console errors
+
+PATCH-3:
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+Apply this as the **follow-up incremental patch after the projection/view patch**. It adds the missing **camera settings UI** for **FOV**, **smooth-time/damping**, and **saved projection preference**, which fits the existing Pro GLB Editor direction where camera settings are meant to be configurable and persisted, and where camera behavior is already part of the quantitative pass gates.  
+
+```diff
+diff --git a/viewer/js/pcf2glb/settings/Proglb_ViewerSettingsStore.js b/viewer/js/pcf2glb/settings/Proglb_ViewerSettingsStore.js
+index 1111111..2222222 100644
+--- a/viewer/js/pcf2glb/settings/Proglb_ViewerSettingsStore.js
++++ b/viewer/js/pcf2glb/settings/Proglb_ViewerSettingsStore.js
+@@ -1,18 +1,27 @@
+ const STORAGE_KEY = 'proglb.foundation.ui.v1';
+
+ export const DEFAULT_SETTINGS = {
+   shortcutsEnabled: true,
+   snapEnabled: true,
+   gridMm: 10,
+   angleDeg: 15,
+   hud: {
+     show: true,
+     showHover: true,
+     showPerf: true,
+   },
+   camera: {
+-    dampingFactor: 0.05,
++    fov: 60,
++    smoothTime: 0.35,
++    dampingFactor: 0.05,
++    preferredProjection: 'PERSPECTIVE',
+   }
+ };
+
+ export function loadSettings() {
+   try {
+     const raw = localStorage.getItem(STORAGE_KEY);
+     if (!raw) return structuredClone(DEFAULT_SETTINGS);
+-    return deepMerge(structuredClone(DEFAULT_SETTINGS), JSON.parse(raw));
++    const merged = deepMerge(structuredClone(DEFAULT_SETTINGS), JSON.parse(raw));
++    merged.camera.fov = clamp(Number(merged.camera.fov) || 60, 20, 120);
++    merged.camera.smoothTime = clamp(Number(merged.camera.smoothTime) || 0.35, 0, 2);
++    merged.camera.dampingFactor = clamp(Number(merged.camera.dampingFactor) || 0.05, 0, 1);
++    merged.camera.preferredProjection =
++      String(merged.camera.preferredProjection || 'PERSPECTIVE').toUpperCase() === 'ORTHOGRAPHIC'
++        ? 'ORTHOGRAPHIC'
++        : 'PERSPECTIVE';
++    return merged;
+   } catch (err) {
+     console.warn('[ProGLB] settings load failed:', err);
+     return structuredClone(DEFAULT_SETTINGS);
+@@ -31,6 +40,10 @@ export function resetSettings() {
+   localStorage.removeItem(STORAGE_KEY);
+   return structuredClone(DEFAULT_SETTINGS);
+ }
+
++function clamp(v, min, max) {
++  return Math.max(min, Math.min(max, v));
++}
++
+ function deepMerge(target, source) {
+   for (const key of Object.keys(source || {})) {
+     const value = source[key];
+diff --git a/viewer/js/pcf2glb/advanced/createCameraController.js b/viewer/js/pcf2glb/advanced/createCameraController.js
+index 3333333..4444444 100644
+--- a/viewer/js/pcf2glb/advanced/createCameraController.js
++++ b/viewer/js/pcf2glb/advanced/createCameraController.js
+@@ -15,8 +15,10 @@ export function createCameraController(camera, domElement) {
+   const controls = new OrbitControls(perspectiveCamera, domElement);
+   controls.enableDamping = true;
+   controls.dampingFactor = 0.05;
++  let smoothTime = 0.35;
+
+   let currentCenter = new THREE.Vector3();
+   let currentDistance = 100;
+   let currentBounds = null;
+   let homePosition = new THREE.Vector3(100, 100, 100);
+@@ -100,7 +102,7 @@ export function createCameraController(camera, domElement) {
+     getPresetView: () => currentPreset,
+
+     setDampingFactor: (value) => {
+-        controls.dampingFactor = Math.max(0, Number(value) || 0);
++        controls.dampingFactor = Math.max(0, Math.min(1, Number(value) || 0));
+     },
+
+     setProjection,
+@@ -109,12 +111,33 @@ export function createCameraController(camera, domElement) {
+     getProjectionMode: () => projectionMode,
+     isOrthographic: () => projectionMode === 'ORTHOGRAPHIC',
+     getActiveCamera: () => activeCamera,
++    getPerspectiveFov: () => perspectiveCamera.fov,
+     setPerspectiveFov: (value) => {
+       const next = Math.max(20, Math.min(120, Number(value) || perspectiveCamera.fov));
+       perspectiveCamera.fov = next;
+       perspectiveCamera.updateProjectionMatrix();
+       updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
+     },
++    getDampingFactor: () => controls.dampingFactor,
++    setSmoothTime: (value) => {
++      const next = Math.max(0, Math.min(2, Number(value) || 0));
++      smoothTime = next;
++      if (smoothTime === 0) {
++        controls.enableDamping = false;
++        controls.dampingFactor = 1;
++      } else {
++        controls.enableDamping = true;
++        controls.dampingFactor = smoothTimeToDamping(smoothTime);
++      }
++    },
++    getSmoothTime: () => smoothTime,
+     onResize: (width, height) => {
+       const safeW = Math.max(1, width || domElement.clientWidth || 1);
+       const safeH = Math.max(1, height || domElement.clientHeight || 1);
+       perspectiveCamera.aspect = safeW / safeH;
+@@ -200,4 +223,8 @@ export function createCameraController(camera, domElement) {
+       updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
+     }
+   }
++
++  function smoothTimeToDamping(seconds) {
++    return Math.max(0.01, Math.min(0.25, 1 / (1 + seconds * 25)));
++  }
+ }
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js b/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
+index 2222222..3333333 100644
+--- a/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
++++ b/viewer/js/pcf2glb/ui/Proglb_ShortcutController.js
+@@ -10,6 +10,9 @@ export function createShortcutController({ onAction, enabled = true }) {
+     ['h', 'view:home'],
+     ['i', 'view:iso'],
+     ['o', 'view:ortho'],
+     ['p', 'view:persp'],
++    ['[', 'camera:fov-down'],
++    [']', 'camera:fov-up'],
++    ['\\', 'view:projection-toggle'],
+     ['g', 'toggle:snap'],
+     ['escape', 'tool:cancel'],
+     ['delete', 'selection:delete'],
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+index 5555555..6666666 100644
+--- a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
++++ b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+@@ -2,7 +2,7 @@ import { createViewerApp } from '../advanced/createViewerApp.js';
+ import { createHudOverlay } from './Proglb_HudOverlay.js';
+ import { createShortcutController } from './Proglb_ShortcutController.js';
+ import { loadSettings, saveSettings } from '../settings/Proglb_ViewerSettingsStore.js';
+
+ export function renderProGlbViewerPanel(container) {
+   const settings = loadSettings();
+@@ -67,6 +67,41 @@ export function renderProGlbViewerPanel(container) {
+                 <div>Snap: <strong id="proglb-snap-label">${settings.snapEnabled ? 'On' : 'Off'}</strong></div>
+                 <div>Grid: <strong id="proglb-grid-label">${settings.gridMm} mm</strong></div>
+                 <div>Angle: <strong id="proglb-angle-label">${settings.angleDeg}°</strong></div>
+                 <div>Projection: <strong id="proglb-proj-label">Perspective</strong></div>
+               </div>
++
++              <div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.08);">
++                <div style="font-size:12px;color:#9fb3c8;margin-bottom:10px;">Camera Settings</div>
++
++                <label style="display:block;font-size:12px;color:#9fb3c8;margin-bottom:6px;">Projection</label>
++                <select id="proglb-camera-projection" style="width:100%;margin-bottom:12px;background:#0b1118;color:#dbe7f5;border:1px solid #263442;border-radius:6px;padding:8px;">
++                  <option value="PERSPECTIVE" ${settings.camera.preferredProjection === 'PERSPECTIVE' ? 'selected' : ''}>Perspective</option>
++                  <option value="ORTHOGRAPHIC" ${settings.camera.preferredProjection === 'ORTHOGRAPHIC' ? 'selected' : ''}>Orthographic</option>
++                </select>
++
++                <label style="display:block;font-size:12px;color:#9fb3c8;margin-bottom:6px;">FOV</label>
++                <div style="display:grid;grid-template-columns:1fr 72px;gap:8px;align-items:center;margin-bottom:12px;">
++                  <input id="proglb-camera-fov-range" type="range" min="20" max="120" step="1" value="${settings.camera.fov}">
++                  <input id="proglb-camera-fov-number" type="number" min="20" max="120" step="1" value="${settings.camera.fov}"
++                         style="background:#0b1118;color:#dbe7f5;border:1px solid #263442;border-radius:6px;padding:8px;">
++                </div>
++
++                <label style="display:block;font-size:12px;color:#9fb3c8;margin-bottom:6px;">Smooth Time</label>
++                <div style="display:grid;grid-template-columns:1fr 72px;gap:8px;align-items:center;margin-bottom:12px;">
++                  <input id="proglb-camera-smooth-range" type="range" min="0" max="2" step="0.05" value="${settings.camera.smoothTime}">
++                  <input id="proglb-camera-smooth-number" type="number" min="0" max="2" step="0.05" value="${settings.camera.smoothTime}"
++                         style="background:#0b1118;color:#dbe7f5;border:1px solid #263442;border-radius:6px;padding:8px;">
++                </div>
++
++                <div style="display:flex;gap:8px;flex-wrap:wrap;">
++                  <button class="btn-proglb" id="proglb-camera-apply-btn" type="button">Apply Camera</button>
++                  <button class="btn-proglb" id="proglb-camera-reset-btn" type="button">Reset Camera Defaults</button>
++                </div>
++
++                <div style="margin-top:10px;font-size:11px;color:#7f95ac;line-height:1.5;">
++                  Shortcuts: <strong>[</strong>/<strong>]</strong> FOV, <strong>O</strong> ortho, <strong>P</strong> perspective,
++                  <strong>\\</strong> toggle projection.
++                </div>
++              </div>
+             </div>
+             <div class="proglb-left-pane" data-pane="annotations" style="display:none;position:absolute;inset:0;padding:12px;overflow:auto;">
+               <div style="font-size:12px;color:#9fb3c8;margin-bottom:8px;">Annotations</div>
+               <div style="font-size:12px;color:#86a0ba;">Foundation phase only. Annotation workflows come later.</div>
+@@ -114,6 +149,12 @@ export function renderProGlbViewerPanel(container) {
+   const fileInput = container.querySelector('#proglb-file-input');
+   const snapToggle = container.querySelector('#proglb-snap-toggle');
+   const gridInput = container.querySelector('#proglb-grid-mm');
+   const angleInput = container.querySelector('#proglb-angle-deg');
++  const projectionSelect = container.querySelector('#proglb-camera-projection');
++  const fovRange = container.querySelector('#proglb-camera-fov-range');
++  const fovNumber = container.querySelector('#proglb-camera-fov-number');
++  const smoothRange = container.querySelector('#proglb-camera-smooth-range');
++  const smoothNumber = container.querySelector('#proglb-camera-smooth-number');
++  const cameraApplyBtn = container.querySelector('#proglb-camera-apply-btn');
++  const cameraResetBtn = container.querySelector('#proglb-camera-reset-btn');
+
+   let activeTool = 'Select';
+   let currentObjectUrl = null;
+@@ -145,6 +186,12 @@ export function renderProGlbViewerPanel(container) {
+       }
+     }
+   );
++
++  viewer.getController().setPerspectiveFov(settings.camera.fov);
++  viewer.getController().setSmoothTime(settings.camera.smoothTime);
++  viewer.setProjection(settings.camera.preferredProjection);
++  currentProjectionMode = viewer.getProjectionMode();
++  updateProjectionState();
+
+   const shortcuts = createShortcutController({
+     enabled: settings.shortcutsEnabled,
+@@ -160,6 +207,28 @@ export function renderProGlbViewerPanel(container) {
+         snapToggle.dispatchEvent(new Event('change'));
+         return;
+       }
++      if (action === 'camera:fov-down') {
++        fovNumber.value = String(Math.max(20, (Number(fovNumber.value) || 60) - 5));
++        syncFovInputs('number');
++        applyCameraSettings({ persist: true, logSource: 'shortcut' });
++        return;
++      }
++      if (action === 'camera:fov-up') {
++        fovNumber.value = String(Math.min(120, (Number(fovNumber.value) || 60) + 5));
++        syncFovInputs('number');
++        applyCameraSettings({ persist: true, logSource: 'shortcut' });
++        return;
++      }
++      if (action === 'view:projection-toggle') {
++        const next = viewer.getProjectionMode() === 'ORTHOGRAPHIC' ? 'PERSPECTIVE' : 'ORTHOGRAPHIC';
++        projectionSelect.value = next;
++        applyCameraSettings({ persist: true, logSource: 'shortcut' });
++        return;
++      }
+ 
+       if (action === 'tool:cancel') {
+         setActiveTool('Select');
+@@ -190,6 +259,21 @@ export function renderProGlbViewerPanel(container) {
+         viewer.home();
+         logUi('CAMERA', 'info', 'home');
+         return updateHud();
+       }
+       if (action === 'view:persp') {
++        projectionSelect.value = 'PERSPECTIVE';
++        applyCameraSettings({ persist: true, logSource: 'toolbar' });
++        return updateHud();
++      }
++      if (action === 'view:ortho') {
++        projectionSelect.value = 'ORTHOGRAPHIC';
++        applyCameraSettings({ persist: true, logSource: 'toolbar' });
++        return updateHud();
++      }
++      if (action === 'view:iso') {
++        viewer.setPresetView('ISO');
++        logUi('CAMERA', 'info', 'preset ISO');
++        return updateHud();
++      }
++      if (action === 'view:persp') {
+         viewer.setProjection('PERSPECTIVE');
+         currentProjectionMode = viewer.getProjectionMode();
+         logUi('CAMERA', 'info', 'projection perspective');
+@@ -197,12 +281,6 @@ export function renderProGlbViewerPanel(container) {
+       }
+       if (action === 'view:ortho') {
+         viewer.setProjection('ORTHOGRAPHIC');
+         currentProjectionMode = viewer.getProjectionMode();
+         logUi('CAMERA', 'info', 'projection orthographic');
+-        return updateHud();
+-      }
+-      if (action === 'view:iso') {
+-        viewer.setPresetView('ISO');
+-        logUi('CAMERA', 'info', 'preset ISO');
+         return updateHud();
+       }
+       if (action === 'view:top') {
+@@ -255,6 +333,40 @@ export function renderProGlbViewerPanel(container) {
+     logUi('SETTINGS', 'info', `angle ${settings.angleDeg}°`);
+   });
+ 
++  fovRange.addEventListener('input', () => syncFovInputs('range'));
++  fovNumber.addEventListener('input', () => syncFovInputs('number'));
++  smoothRange.addEventListener('input', () => syncSmoothInputs('range'));
++  smoothNumber.addEventListener('input', () => syncSmoothInputs('number'));
++
++  projectionSelect.addEventListener('change', () => {
++    applyCameraSettings({ persist: true, logSource: 'projection-select' });
++  });
++
++  cameraApplyBtn.addEventListener('click', () => {
++    applyCameraSettings({ persist: true, logSource: 'camera-apply' });
++  });
++
++  cameraResetBtn.addEventListener('click', () => {
++    settings.camera.fov = 60;
++    settings.camera.smoothTime = 0.35;
++    settings.camera.preferredProjection = 'PERSPECTIVE';
++
++    fovRange.value = '60';
++    fovNumber.value = '60';
++    smoothRange.value = '0.35';
++    smoothNumber.value = '0.35';
++    projectionSelect.value = 'PERSPECTIVE';
++
++    applyCameraSettings({ persist: true, logSource: 'camera-reset' });
++    logUi('CAMERA', 'info', 'camera defaults restored');
++  });
++
+   preview.addEventListener('pointerleave', () => {
+     if (hoverRaf) cancelAnimationFrame(hoverRaf);
+     hud.hideHover();
+   });
+@@ -337,6 +449,7 @@ export function renderProGlbViewerPanel(container) {
+     if (toolLabel) toolLabel.textContent = activeTool;
+     if (snapLabel) snapLabel.textContent = settings.snapEnabled ? 'On' : 'Off';
+     if (gridLabel) gridLabel.textContent = `${settings.gridMm} mm`;
+     if (angleLabel) angleLabel.textContent = `${settings.angleDeg}°`;
+     updateProjectionState();
+     updateHud();
+   }
+@@ -355,7 +468,7 @@ export function renderProGlbViewerPanel(container) {
+     hud.setStatus({
+       tool: activeTool,
+       snap: settings.snapEnabled ? `On · ${settings.gridMm}mm` : 'Off',
+       xyz,
+-      view: `${currentProjectionMode === 'ORTHOGRAPHIC' ? 'Ortho' : 'Persp'} · ${view}`,
++      view: `${currentProjectionMode === 'ORTHOGRAPHIC' ? 'Ortho' : 'Persp'} · ${view} · FOV ${viewer.getController().getPerspectiveFov()}`,
+       fps: currentFps,
+       selection: selection?.id || selection?.refNo || 'None',
+     });
+@@ -371,6 +484,56 @@ export function renderProGlbViewerPanel(container) {
+       btn.style.outline = isActive ? '2px solid #5ea2ff' : '';
+     });
+   }
++
++  function syncFovInputs(source) {
++    const value = clamp(Number(source === 'range' ? fovRange.value : fovNumber.value) || 60, 20, 120);
++    fovRange.value = String(value);
++    fovNumber.value = String(value);
++  }
++
++  function syncSmoothInputs(source) {
++    const value = clamp(Number(source === 'range' ? smoothRange.value : smoothNumber.value) || 0.35, 0, 2);
++    smoothRange.value = String(value);
++    smoothNumber.value = String(value);
++  }
++
++  function applyCameraSettings({ persist, logSource }) {
++    syncFovInputs('number');
++    syncSmoothInputs('number');
++
++    const fov = clamp(Number(fovNumber.value) || 60, 20, 120);
++    const smoothTime = clamp(Number(smoothNumber.value) || 0.35, 0, 2);
++    const projection = String(projectionSelect.value || 'PERSPECTIVE').toUpperCase() === 'ORTHOGRAPHIC'
++      ? 'ORTHOGRAPHIC'
++      : 'PERSPECTIVE';
++
++    settings.camera.fov = fov;
++    settings.camera.smoothTime = smoothTime;
++    settings.camera.preferredProjection = projection;
++
++    const controller = viewer.getController();
++    controller.setPerspectiveFov(fov);
++    controller.setSmoothTime(smoothTime);
++    viewer.setProjection(projection);
++    currentProjectionMode = viewer.getProjectionMode();
++
++    if (persist) {
++      settings.camera.dampingFactor = controller.getDampingFactor();
++      saveSettings(settings);
++    }
++
++    updateProjectionState();
++    updateHud();
++    logUi('CAMERA', 'info', `camera settings applied (${logSource})`, {
++      fov,
++      smoothTime,
++      projection
++    });
++  }
+ }
+ 
+ function escapeHtml(value) {
+@@ -381,6 +544,10 @@ function escapeHtml(value) {
+     .replace(/"/g, '&quot;')
+     .replace(/'/g, '&#39;');
+ }
++
++function clamp(v, min, max) {
++  return Math.max(min, Math.min(max, v));
++}
+ 
+ let injected = false;
+ function injectLocalStyles() {
+@@ -415,6 +582,15 @@ function injectLocalStyles() {
+     .btn-left-tab.active {
+       background:#182432;
+       color:#ffffff;
+       font-weight:600;
+     }
++    #proglb-camera-fov-range,
++    #proglb-camera-smooth-range {
++      width:100%;
++      accent-color:#5ea2ff;
++    }
++    #proglb-camera-projection:focus,
++    #proglb-camera-fov-number:focus,
++    #proglb-camera-smooth-number:focus {
++      outline:2px solid #5ea2ff;
++      outline-offset:1px;
++    }
+   `;
+   document.head.appendChild(style);
+ }
+```
+
+What this patch adds:
+
+* **camera settings UI** in the left **Tools** dock
+* persisted **Projection** selector
+* persisted **FOV** slider + numeric input
+* persisted **Smooth Time** slider + numeric input
+* **Apply** and **Reset Camera Defaults**
+* shortcut support for:
+
+  * `[` FOV down
+  * `]` FOV up
+  * `O` ortho
+  * `P` perspective
+  * `\` projection toggle
+* HUD now shows **FOV**
+* controller now exposes:
+
+  * `getPerspectiveFov()`
+  * `setSmoothTime()`
+  * `getSmoothTime()`
+  * `getDampingFactor()`
+
+Recommended smoke test:
+
+1. Open `Pro GLB Editor`
+2. Load a GLB
+3. Change **FOV** from 60 → 20 → 120
+4. Change **Smooth Time** from 0.35 → 0 → 1.0
+5. Switch **Perspective ↔ Orthographic**
+6. Refresh page
+7. Confirm FOV / smooth / projection persisted
+8. Test shortcuts `[`, `]`, `O`, `P`, `\`
+9. Confirm no red console errors
+
+
+PATCH-4:
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+
+Apply this as the **next incremental patch after the camera-settings patch**. It adds **automated camera validation hooks + debug counters** so Playwright/manual smoke runs can inspect real camera behavior against the same kinds of pass gates your WI already expects for camera actions, settings, aligned views, ortho/perspective, and structured `CAMERA` logging.  
+
+```diff
+diff --git a/viewer/js/pcf2glb/debug/Proglb_CameraDiagnostics.js b/viewer/js/pcf2glb/debug/Proglb_CameraDiagnostics.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/debug/Proglb_CameraDiagnostics.js
+@@ -0,0 +1,193 @@
++const MAX_SAMPLES = 120;
++
++export const CAMERA_THRESHOLDS = {
++  fitResponseMs: 150,
++  fitCompleteMs: 700,
++  homeCompleteMs: 500,
++  modeSwitchResponseMs: 200,
++  presetResponseMs: 150,
++  minOperationalFps: 30,
++};
++
++export function createCameraDiagnostics() {
++  const state = {
++    mountedAt: Date.now(),
++    frameCount: 0,
++    fps: {
++      current: 0,
++      min: Number.POSITIVE_INFINITY,
++      max: 0,
++      samples: [],
++      lastTs: 0,
++    },
++    counters: {
++      fit: 0,
++      home: 0,
++      preset: 0,
++      projectionSwitch: 0,
++      fovChange: 0,
++      smoothTimeChange: 0,
++      errors: 0,
++      warnings: 0,
++      cameraLogs: 0,
++    },
++    presets: {},
++    projections: {
++      current: 'PERSPECTIVE',
++      history: [],
++    },
++    samples: {
++      fitResponseMs: [],
++      fitCompleteMs: [],
++      homeCompleteMs: [],
++      modeSwitchResponseMs: [],
++      presetResponseMs: [],
++      fovValues: [],
++      smoothTimeValues: [],
++    },
++    pending: [],
++    last: {
++      preset: 'ISO',
++      action: null,
++      selectionId: null,
++    }
++  };
++
++  attachGlobal();
++
++  return {
++    incrementCameraLog() {
++      state.counters.cameraLogs += 1;
++      attachGlobal();
++    },
++    recordWarning(reason, payload = null) {
++      state.counters.warnings += 1;
++      state.last.warning = { reason, payload, at: Date.now() };
++      attachGlobal();
++    },
++    recordError(reason, payload = null) {
++      state.counters.errors += 1;
++      state.last.error = { reason, payload, at: Date.now() };
++      attachGlobal();
++    },
++    recordProjection(mode) {
++      const next = String(mode || 'PERSPECTIVE').toUpperCase();
++      state.projections.current = next;
++      state.projections.history.push({ mode: next, at: Date.now() });
++      if (state.projections.history.length > MAX_SAMPLES) state.projections.history.shift();
++      attachGlobal();
++    },
++    recordPreset(name) {
++      const key = String(name || 'ISO').toUpperCase();
++      state.last.preset = key;
++      state.presets[key] = (state.presets[key] || 0) + 1;
++      attachGlobal();
++    },
++    recordFov(value) {
++      pushSample(state.samples.fovValues, Number(value) || 0);
++      state.counters.fovChange += 1;
++      attachGlobal();
++    },
++    recordSmoothTime(value) {
++      pushSample(state.samples.smoothTimeValues, Number(value) || 0);
++      state.counters.smoothTimeChange += 1;
++      attachGlobal();
++    },
++    startTimedAction(type, meta = {}) {
++      const action = {
++        id: `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
++        type,
++        meta,
++        startedAt: performance.now(),
++        firstFrameAt: null,
++        completedAt: null,
++      };
++      state.pending.push(action);
++      state.last.action = { type, meta, startedAt: Date.now() };
++
++      if (type === 'fit') state.counters.fit += 1;
++      if (type === 'home') state.counters.home += 1;
++      if (type === 'preset') state.counters.preset += 1;
++      if (type === 'projectionSwitch') state.counters.projectionSwitch += 1;
++
++      attachGlobal();
++      return action.id;
++    },
++    completeTimedAction(actionId) {
++      const action = state.pending.find(x => x.id === actionId);
++      if (!action || action.completedAt) return;
++      action.completedAt = performance.now();
++
++      const totalMs = action.completedAt - action.startedAt;
++      if (action.type === 'fit') pushSample(state.samples.fitCompleteMs, totalMs);
++      if (action.type === 'home') pushSample(state.samples.homeCompleteMs, totalMs);
++    },
++    recordFrame(ts = performance.now()) {
++      state.frameCount += 1;
++      if (state.fps.lastTs) {
++        const dt = ts - state.fps.lastTs;
++        if (dt > 0) {
++          const fps = 1000 / dt;
++          state.fps.current = Math.round(fps);
++          state.fps.min = Math.min(state.fps.min, fps);
++          state.fps.max = Math.max(state.fps.max, fps);
++          pushSample(state.fps.samples, fps);
++        }
++      }
++      state.fps.lastTs = ts;
++
++      for (const action of state.pending) {
++        if (!action.firstFrameAt) {
++          action.firstFrameAt = ts;
++          const responseMs = action.firstFrameAt - action.startedAt;
++          if (action.type === 'fit') pushSample(state.samples.fitResponseMs, responseMs);
++          if (action.type === 'preset') pushSample(state.samples.presetResponseMs, responseMs);
++          if (action.type === 'projectionSwitch') pushSample(state.samples.modeSwitchResponseMs, responseMs);
++        }
++      }
++      attachGlobal();
++    },
++    snapshot() {
++      return buildSnapshot(state);
++    },
++    reset() {
++      const fresh = createCameraDiagnostics();
++      Object.assign(state, fresh.snapshot()._rawState);
++      attachGlobal();
++    }
++  };
++
++  function attachGlobal() {
++    window.__PROGLB_CAMERA_DIAG__ = {
++      snapshot: () => buildSnapshot(state),
++      thresholds: { ...CAMERA_THRESHOLDS }
++    };
++  }
++}
++
++function buildSnapshot(state) {
++  const snapshot = {
++    mountedAt: state.mountedAt,
++    frameCount: state.frameCount,
++    fps: {
++      current: state.fps.current,
++      min: Number.isFinite(state.fps.min) ? Math.round(state.fps.min) : 0,
++      max: Math.round(state.fps.max || 0),
++      p50: round(percentile(state.fps.samples, 50)),
++      p95: round(percentile(state.fps.samples, 95)),
++    },
++    counters: structuredClone(state.counters),
++    presets: structuredClone(state.presets),
++    projections: structuredClone(state.projections),
++    samples: {
++      fitResponseP95: round(percentile(state.samples.fitResponseMs, 95)),
++      fitCompleteP95: round(percentile(state.samples.fitCompleteMs, 95)),
++      homeCompleteP95: round(percentile(state.samples.homeCompleteMs, 95)),
++      modeSwitchResponseP95: round(percentile(state.samples.modeSwitchResponseMs, 95)),
++      presetResponseP95: round(percentile(state.samples.presetResponseMs, 95)),
++      lastFov: last(state.samples.fovValues),
++      lastSmoothTime: last(state.samples.smoothTimeValues),
++    },
++    passHints: {
++      fitResponseOk: percentile(state.samples.fitResponseMs, 95) <= CAMERA_THRESHOLDS.fitResponseMs,
++      fitCompleteOk: percentile(state.samples.fitCompleteMs, 95) <= CAMERA_THRESHOLDS.fitCompleteMs,
++      homeCompleteOk: percentile(state.samples.homeCompleteMs, 95) <= CAMERA_THRESHOLDS.homeCompleteMs,
++      modeSwitchOk: percentile(state.samples.modeSwitchResponseMs, 95) <= CAMERA_THRESHOLDS.modeSwitchResponseMs,
++      presetResponseOk: percentile(state.samples.presetResponseMs, 95) <= CAMERA_THRESHOLDS.presetResponseMs,
++      fpsOk: percentile(state.fps.samples, 50) >= CAMERA_THRESHOLDS.minOperationalFps,
++      noErrors: state.counters.errors === 0,
++    },
++    _rawState: state
++  };
++  return snapshot;
++}
++
++function pushSample(arr, value) {
++  arr.push(value);
++  if (arr.length > MAX_SAMPLES) arr.shift();
++}
++
++function percentile(arr, p) {
++  if (!arr.length) return 0;
++  const sorted = [...arr].sort((a, b) => a - b);
++  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
++  return sorted[idx];
++}
++
++function round(v) { return Math.round((v || 0) * 100) / 100; }
++function last(arr) { return arr.length ? arr[arr.length - 1] : null; }
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+index 6666666..7777777 100644
+--- a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
++++ b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+@@ -1,6 +1,7 @@
+ import { createViewerApp } from '../advanced/createViewerApp.js';
+ import { createHudOverlay } from './Proglb_HudOverlay.js';
+ import { createShortcutController } from './Proglb_ShortcutController.js';
++import { createCameraDiagnostics } from '../debug/Proglb_CameraDiagnostics.js';
+ import { loadSettings, saveSettings } from '../settings/Proglb_ViewerSettingsStore.js';
+
+ export function renderProGlbViewerPanel(container) {
+@@ -95,7 +96,8 @@ export function renderProGlbViewerPanel(container) {
+       <div style="border-top:1px solid #202b36;background:#0f151c;display:grid;grid-template-rows:40px 1fr;min-height:0;">
+         <div style="display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #202b36;">
+           <div style="font-size:12px;color:#9fb3c8;">Debug Console</div>
+-          <div style="font-size:11px;color:#7f95ac;">Foundation phase logs</div>
++          <div id="proglb-camera-diag-summary" style="font-size:11px;color:#7f95ac;">Camera diag idle</div>
++          <div style="font-size:11px;color:#7f95ac;">Foundation phase logs</div>
+         </div>
+         <div id="proglb-debug-logs" style="min-height:0;overflow:auto;padding:10px 12px;font-family:monospace;font-size:11px;background:#0b1118;"></div>
+       </div>
+@@ -122,6 +124,7 @@ export function renderProGlbViewerPanel(container) {
+   const smoothNumber = container.querySelector('#proglb-camera-smooth-number');
+   const cameraApplyBtn = container.querySelector('#proglb-camera-apply-btn');
+   const cameraResetBtn = container.querySelector('#proglb-camera-reset-btn');
++  const cameraDiagSummary = container.querySelector('#proglb-camera-diag-summary');
+
+   let activeTool = 'Select';
+   let currentObjectUrl = null;
+@@ -131,10 +134,16 @@ export function renderProGlbViewerPanel(container) {
+   let lastFpsSampleTs = performance.now();
+   let frameCounter = 0;
+   let currentFps = 0;
+   let currentProjectionMode = 'PERSPECTIVE';
++  let summaryRaf = 0;
++  let destroyed = false;
+
+   const hud = createHudOverlay(preview);
++  const cameraDiag = createCameraDiagnostics();
++  cameraDiag.recordProjection(settings.camera.preferredProjection);
++  cameraDiag.recordFov(settings.camera.fov);
++  cameraDiag.recordSmoothTime(settings.camera.smoothTime);
+
+   const viewer = createViewerApp(
+     preview,
+     hiddenToolbar,
+@@ -153,6 +162,7 @@ export function renderProGlbViewerPanel(container) {
+       onSceneLoaded: ({ sceneIndex }) => {
+         renderModelTree(sceneIndex);
+         logUi('SCENE', 'info', `scene loaded (${sceneIndex?.items?.length ?? 0} indexed objects)`);
++        updateCameraDiagSummary();
+         updateHud();
+       },
+       onFrame: () => {
+@@ -160,6 +170,8 @@ export function renderProGlbViewerPanel(container) {
++        cameraDiag.recordFrame(performance.now());
++        updateCameraDiagSummary();
+       }
+     }
+   );
+@@ -195,6 +207,7 @@ export function renderProGlbViewerPanel(container) {
+       if (action === 'camera:fov-down') {
+         fovNumber.value = String(Math.max(20, (Number(fovNumber.value) || 60) - 5));
+         syncFovInputs('number');
++        cameraDiag.recordFov(Number(fovNumber.value));
+         applyCameraSettings({ persist: true, logSource: 'shortcut' });
+         return;
+       }
+@@ -202,12 +215,17 @@ export function renderProGlbViewerPanel(container) {
+       if (action === 'camera:fov-up') {
+         fovNumber.value = String(Math.min(120, (Number(fovNumber.value) || 60) + 5));
+         syncFovInputs('number');
++        cameraDiag.recordFov(Number(fovNumber.value));
+         applyCameraSettings({ persist: true, logSource: 'shortcut' });
+         return;
+       }
+       if (action === 'view:projection-toggle') {
+         const next = viewer.getProjectionMode() === 'ORTHOGRAPHIC' ? 'PERSPECTIVE' : 'ORTHOGRAPHIC';
+         projectionSelect.value = next;
++        const token = cameraDiag.startTimedAction('projectionSwitch', { via: 'shortcut-toggle', to: next });
+         applyCameraSettings({ persist: true, logSource: 'shortcut' });
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordProjection(next);
+         return;
+       }
+
+@@ -241,12 +259,19 @@ export function renderProGlbViewerPanel(container) {
+       if (action === 'view:fit') {
++        const token = cameraDiag.startTimedAction('fit', { via: 'toolbar' });
+         viewer.fitAll();
++        cameraDiag.completeTimedAction(token);
+         logUi('CAMERA', 'info', 'fit all');
+         return updateHud();
+       }
+       if (action === 'view:home') {
++        const token = cameraDiag.startTimedAction('home', { via: 'toolbar' });
+         viewer.home();
++        cameraDiag.completeTimedAction(token);
+         logUi('CAMERA', 'info', 'home');
+         return updateHud();
+       }
+       if (action === 'view:persp') {
++        const token = cameraDiag.startTimedAction('projectionSwitch', { via: 'toolbar', to: 'PERSPECTIVE' });
+         projectionSelect.value = 'PERSPECTIVE';
+         applyCameraSettings({ persist: true, logSource: 'toolbar' });
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordProjection('PERSPECTIVE');
+         return updateHud();
+       }
+       if (action === 'view:ortho') {
++        const token = cameraDiag.startTimedAction('projectionSwitch', { via: 'toolbar', to: 'ORTHOGRAPHIC' });
+         projectionSelect.value = 'ORTHOGRAPHIC';
+         applyCameraSettings({ persist: true, logSource: 'toolbar' });
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordProjection('ORTHOGRAPHIC');
+         return updateHud();
+       }
+       if (action === 'view:iso') {
++        const token = cameraDiag.startTimedAction('preset', { preset: 'ISO' });
+         viewer.setPresetView('ISO');
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordPreset('ISO');
+         logUi('CAMERA', 'info', 'preset ISO');
+         return updateHud();
+       }
+       if (action === 'view:top') {
++        const token = cameraDiag.startTimedAction('preset', { preset: 'TOP' });
+         viewer.setPresetView('TOP');
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordPreset('TOP');
+         logUi('CAMERA', 'info', 'preset TOP');
+         return updateHud();
+       }
+       if (action === 'view:front') {
++        const token = cameraDiag.startTimedAction('preset', { preset: 'FRONT' });
+         viewer.setPresetView('FRONT');
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordPreset('FRONT');
+         logUi('CAMERA', 'info', 'preset FRONT');
+         return updateHud();
+       }
+       if (action === 'view:back') {
++        const token = cameraDiag.startTimedAction('preset', { preset: 'BACK' });
+         viewer.setPresetView('BACK');
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordPreset('BACK');
+         logUi('CAMERA', 'info', 'preset BACK');
+         return updateHud();
+       }
+       if (action === 'view:left') {
++        const token = cameraDiag.startTimedAction('preset', { preset: 'LEFT' });
+         viewer.setPresetView('LEFT');
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordPreset('LEFT');
+         logUi('CAMERA', 'info', 'preset LEFT');
+         return updateHud();
+       }
+       if (action === 'view:right') {
++        const token = cameraDiag.startTimedAction('preset', { preset: 'RIGHT' });
+         viewer.setPresetView('RIGHT');
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordPreset('RIGHT');
+         logUi('CAMERA', 'info', 'preset RIGHT');
+         return updateHud();
+       }
+       if (action === 'view:bottom') {
++        const token = cameraDiag.startTimedAction('preset', { preset: 'BOTTOM' });
+         viewer.setPresetView('BOTTOM');
++        cameraDiag.completeTimedAction(token);
++        cameraDiag.recordPreset('BOTTOM');
+         logUi('CAMERA', 'info', 'preset BOTTOM');
+         return updateHud();
+       }
+@@ -284,10 +309,13 @@ export function renderProGlbViewerPanel(container) {
+ 
+   projectionSelect.addEventListener('change', () => {
++    cameraDiag.recordProjection(projectionSelect.value);
+     applyCameraSettings({ persist: true, logSource: 'projection-select' });
+   });
+
+   cameraApplyBtn.addEventListener('click', () => {
++    cameraDiag.recordFov(Number(fovNumber.value));
++    cameraDiag.recordSmoothTime(Number(smoothNumber.value));
+     applyCameraSettings({ persist: true, logSource: 'camera-apply' });
+   });
+
+@@ -301,6 +329,8 @@ export function renderProGlbViewerPanel(container) {
+     fovRange.value = '60';
+     fovNumber.value = '60';
+     smoothRange.value = '0.35';
+     smoothNumber.value = '0.35';
+     projectionSelect.value = 'PERSPECTIVE';
++    cameraDiag.recordFov(60);
++    cameraDiag.recordSmoothTime(0.35);
+
+     applyCameraSettings({ persist: true, logSource: 'camera-reset' });
+     logUi('CAMERA', 'info', 'camera defaults restored');
+@@ -319,6 +349,7 @@ export function renderProGlbViewerPanel(container) {
+   syncToolState();
+   logUi('SCENE', 'info', 'foundation shell mounted');
+   updateHud();
+   currentProjectionMode = viewer.getProjectionMode();
+   updateProjectionState();
+   startPerfLoop();
++  startSummaryLoop();
+
+   return {
+     destroy() {
+       destroyed = true;
+       if (hoverRaf) cancelAnimationFrame(hoverRaf);
+       if (perfRaf) cancelAnimationFrame(perfRaf);
++      if (summaryRaf) cancelAnimationFrame(summaryRaf);
+       shortcuts.destroy();
+       hud.destroy();
+       viewer.dispose();
+@@ -395,6 +426,7 @@ export function renderProGlbViewerPanel(container) {
+     updateProjectionState();
+     updateHud();
+     logUi('CAMERA', 'info', `camera settings applied (${logSource})`, {
+       fov,
+       smoothTime,
+       projection
+     });
+   }
++
++  function updateCameraDiagSummary() {
++    if (!cameraDiagSummary) return;
++    const snap = window.__PROGLB_CAMERA_DIAG__?.snapshot?.();
++    if (!snap) return;
++    cameraDiagSummary.textContent =
++      `CamDiag fitP95:${snap.samples.fitCompleteP95}ms homeP95:${snap.samples.homeCompleteP95}ms modeP95:${snap.samples.modeSwitchResponseP95}ms fpsP50:${snap.fps.p50} err:${snap.counters.errors}`;
++    cameraDiagSummary.style.color = snap.passHints.noErrors && snap.passHints.fpsOk ? '#7f95ac' : '#ffd166';
++  }
++
++  function startSummaryLoop() {
++    function loop() {
++      if (destroyed) return;
++      updateCameraDiagSummary();
++      summaryRaf = requestAnimationFrame(loop);
++    }
++    summaryRaf = requestAnimationFrame(loop);
++  }
+ }
+```
+
+What this patch adds:
+
+* new `Proglb_CameraDiagnostics.js`
+* global test hook:
+
+  * `window.__PROGLB_CAMERA_DIAG__.snapshot()`
+  * `window.__PROGLB_CAMERA_DIAG__.thresholds`
+* rolling counters for:
+
+  * fit
+  * home
+  * preset views
+  * projection switches
+  * FOV changes
+  * smooth-time changes
+  * camera log count
+  * warnings/errors
+* rolling timing samples for:
+
+  * fit response
+  * fit complete
+  * home complete
+  * mode-switch response
+  * preset response
+* rolling FPS stats
+* bottom-dock live summary for quick manual validation
+
+Recommended validation in devtools / Playwright:
+
+```js
+const diag = await page.evaluate(() => window.__PROGLB_CAMERA_DIAG__.snapshot());
+console.log(diag.passHints, diag.samples, diag.counters);
+```
+
+Recommended smoke sequence:
+
+1. load model
+2. `Fit`
+3. `Home`
+4. switch `Perspective -> Orthographic -> Perspective`
+5. click `ISO / Top / Front / Right / Back / Left / Bottom`
+6. change FOV and smooth-time
+7. inspect `window.__PROGLB_CAMERA_DIAG__.snapshot()`
+8. confirm:
+
+   * `noErrors === true`
+   * `fitCompleteOk === true`
+   * `modeSwitchOk === true`
+   * `fpsOk === true`
+
+
+PATCH-5
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+
+This patch turns the camera diagnostics hook into an actual **Playwright validation layer** for the Pro GLB Viewer. It exercises the same camera behaviors your WI and pass tests already emphasize: shell availability, camera actions, settings persistence, projection switching, fit/home behavior, and structured camera logging.    
+
+Two honest notes before you apply it:
+
+* this patch assumes you place one **small GLB fixture** at `tests/fixtures/sample.glb`
+* the `webServer.command` uses `node server.js`; if your actual local run command differs, replace that one line
+
+```diff
+diff --git a/package.json b/package.json
+index 1111111..2222222 100644
+--- a/package.json
++++ b/package.json
+@@ -1,12 +1,20 @@
+ {
+   "name": "crf-4-1-main",
+   "version": "1.0.0",
+   "private": true,
+   "scripts": {
+-    "start": "node server.js"
++    "start": "node server.js",
++    "test:e2e": "playwright test",
++    "test:e2e:headed": "playwright test --headed",
++    "test:e2e:ui": "playwright test --ui"
+   },
+   "devDependencies": {
++    "@playwright/test": "^1.54.0"
+   }
+ }
+diff --git a/playwright.config.ts b/playwright.config.ts
+new file mode 100644
+--- /dev/null
++++ b/playwright.config.ts
+@@ -0,0 +1,42 @@
++import { defineConfig, devices } from '@playwright/test';
++
++const PORT = Number(process.env.PORT || 3000);
++const BASE_URL = process.env.E2E_BASE_URL || `http://127.0.0.1:${PORT}`;
++
++export default defineConfig({
++  testDir: './tests/playwright',
++  timeout: 60_000,
++  expect: {
++    timeout: 10_000
++  },
++  fullyParallel: false,
++  forbidOnly: !!process.env.CI,
++  retries: process.env.CI ? 1 : 0,
++  reporter: [['list'], ['html', { open: 'never' }]],
++  use: {
++    baseURL: BASE_URL,
++    trace: 'retain-on-failure',
++    screenshot: 'only-on-failure',
++    video: 'retain-on-failure',
++    viewport: { width: 1600, height: 1000 }
++  },
++  webServer: process.env.E2E_BASE_URL
++    ? undefined
++    : {
++        command: 'node server.js',
++        url: BASE_URL,
++        reuseExistingServer: !process.env.CI,
++        timeout: 120_000
++      },
++  projects: [
++    {
++      name: 'chromium',
++      use: {
++        ...devices['Desktop Chrome']
++      }
++    }
++  ]
++});
+diff --git a/tests/fixtures/README.md b/tests/fixtures/README.md
+new file mode 100644
+--- /dev/null
++++ b/tests/fixtures/README.md
+@@ -0,0 +1,9 @@
++# Playwright fixture files
++
++Place a small GLB fixture here:
++
++- `sample.glb`
++
++Recommended:
++- under 10 MB
++- centered or reasonably fit-able model
+diff --git a/tests/playwright/utils/proglb.ts b/tests/playwright/utils/proglb.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/playwright/utils/proglb.ts
+@@ -0,0 +1,118 @@
++import path from 'path';
++import { expect, Page } from '@playwright/test';
++
++export async function gotoApp(page: Page) {
++  await page.goto('/');
++  await page.waitForLoadState('domcontentloaded');
++}
++
++export async function openProGlbTab(page: Page) {
++  await page.getByRole('button', { name: /pro glb viewer/i }).click();
++  await expect(page.locator('#proglb-root')).toBeVisible();
++}
++
++export async function openToolsPane(page: Page) {
++  await page.getByRole('button', { name: /^tools$/i }).click();
++  await expect(page.locator('#proglb-tool-state')).toBeVisible();
++}
++
++export async function ensureCameraDiagHook(page: Page) {
++  await expect.poll(async () => {
++    return await page.evaluate(() => {
++      return typeof window.__PROGLB_CAMERA_DIAG__?.snapshot === 'function';
++    });
++  }).toBeTruthy();
++}
++
++export async function uploadFixtureGlb(page: Page, fixtureName = 'sample.glb') {
++  const filePath = path.resolve(process.cwd(), 'tests', 'fixtures', fixtureName);
++  await page.setInputFiles('#proglb-file-input', filePath);
++  await expect.poll(async () => {
++    const diag = await getCameraDiagSnapshot(page);
++    return diag?.counters?.fit ?? 0;
++  }).toBeGreaterThan(0);
++}
++
++export async function getCameraDiagSnapshot(page: Page) {
++  return await page.evaluate(() => window.__PROGLB_CAMERA_DIAG__?.snapshot?.() ?? null);
++}
++
++export async function clickToolbar(page: Page, action: string) {
++  await page.locator(`[data-action="${action}"]`).click();
++}
++
++export async function setProjection(page: Page, mode: 'PERSPECTIVE' | 'ORTHOGRAPHIC') {
++  await openToolsPane(page);
++  await page.locator('#proglb-camera-projection').selectOption(mode);
++}
++
++export async function setFov(page: Page, value: number) {
++  await openToolsPane(page);
++  await page.fill('#proglb-camera-fov-number', String(value));
++  await page.click('#proglb-camera-apply-btn');
++}
++
++export async function setSmoothTime(page: Page, value: number) {
++  await openToolsPane(page);
++  await page.fill('#proglb-camera-smooth-number', String(value));
++  await page.click('#proglb-camera-apply-btn');
++}
++
++export async function expectProjection(page: Page, modeText: string) {
++  await expect(page.locator('#proglb-proj-label')).toHaveText(modeText);
++}
++
++export async function waitForCameraSettled(page: Page, ms = 250) {
++  await page.waitForTimeout(ms);
++}
++
++export async function expectNoCameraErrors(page: Page) {
++  const diag = await getCameraDiagSnapshot(page);
++  expect(diag.counters.errors).toBe(0);
++}
++
++export async function expectCameraPassHints(page: Page) {
++  const diag = await getCameraDiagSnapshot(page);
++  expect(diag.passHints.noErrors).toBeTruthy();
++  expect(diag.passHints.fitResponseOk).toBeTruthy();
++  expect(diag.passHints.fitCompleteOk).toBeTruthy();
++  expect(diag.passHints.modeSwitchOk).toBeTruthy();
++}
++
++declare global {
++  interface Window {
++    __PROGLB_CAMERA_DIAG__?: {
++      snapshot?: () => any;
++      thresholds?: Record<string, number>;
++    };
++  }
++}
+diff --git a/tests/playwright/proglb-camera.spec.ts b/tests/playwright/proglb-camera.spec.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/playwright/proglb-camera.spec.ts
+@@ -0,0 +1,177 @@
++import { test, expect } from '@playwright/test';
++import {
++  clickToolbar,
++  ensureCameraDiagHook,
++  expectCameraPassHints,
++  expectNoCameraErrors,
++  expectProjection,
++  getCameraDiagSnapshot,
++  gotoApp,
++  openProGlbTab,
++  openToolsPane,
++  setFov,
++  setProjection,
++  setSmoothTime,
++  uploadFixtureGlb,
++  waitForCameraSettled
++} from './utils/proglb';
++
++test.describe('Pro GLB Viewer camera validation', () => {
++  test.beforeEach(async ({ page }) => {
++    await gotoApp(page);
++    await openProGlbTab(page);
++    await ensureCameraDiagHook(page);
++  });
++
++  test('camera shell and diagnostics hook are present', async ({ page }) => {
++    await expect(page.locator('#proglb-root')).toBeVisible();
++    await expect(page.locator('#proglb-topbar')).toBeVisible();
++    await expect(page.locator('#proglb-preview')).toBeVisible();
++    await expect(page.locator('#proglb-debug-logs')).toBeVisible();
++    await openToolsPane(page);
++    await expect(page.locator('#proglb-camera-projection')).toBeVisible();
++    await expect(page.locator('#proglb-camera-fov-number')).toBeVisible();
++    await expect(page.locator('#proglb-camera-smooth-number')).toBeVisible();
++
++    const diag = await getCameraDiagSnapshot(page);
++    expect(diag).toBeTruthy();
++    expect(diag.counters.errors).toBe(0);
++  });
++
++  test('camera settings persist across reload', async ({ page }) => {
++    await openToolsPane(page);
++
++    await setProjection(page, 'ORTHOGRAPHIC');
++    await setFov(page, 80);
++    await setSmoothTime(page, 0.5);
++
++    await page.reload();
++    await page.waitForLoadState('domcontentloaded');
++    await openProGlbTab(page);
++    await ensureCameraDiagHook(page);
++    await openToolsPane(page);
++
++    await expect(page.locator('#proglb-camera-projection')).toHaveValue('ORTHOGRAPHIC');
++    await expect(page.locator('#proglb-camera-fov-number')).toHaveValue('80');
++    await expect(page.locator('#proglb-camera-smooth-number')).toHaveValue('0.5');
++    await expectProjection(page, 'Orthographic');
++  });
++
++  test('fit, home, projection switching and aligned views update diagnostics', async ({ page }) => {
++    await uploadFixtureGlb(page);
++    await waitForCameraSettled(page, 600);
++
++    await clickToolbar(page, 'view:fit');
++    await waitForCameraSettled(page, 250);
++
++    await clickToolbar(page, 'view:home');
++    await waitForCameraSettled(page, 250);
++
++    await clickToolbar(page, 'view:ortho');
++    await waitForCameraSettled(page, 250);
++
++    await clickToolbar(page, 'view:top');
++    await waitForCameraSettled(page, 200);
++
++    await clickToolbar(page, 'view:front');
++    await waitForCameraSettled(page, 200);
++
++    await clickToolbar(page, 'view:right');
++    await waitForCameraSettled(page, 200);
++
++    await clickToolbar(page, 'view:back');
++    await waitForCameraSettled(page, 200);
++
++    await clickToolbar(page, 'view:left');
++    await waitForCameraSettled(page, 200);
++
++    await clickToolbar(page, 'view:bottom');
++    await waitForCameraSettled(page, 200);
++
++    await clickToolbar(page, 'view:iso');
++    await waitForCameraSettled(page, 200);
++
++    await clickToolbar(page, 'view:persp');
++    await waitForCameraSettled(page, 250);
++
++    const diag = await getCameraDiagSnapshot(page);
++    expect(diag.counters.fit).toBeGreaterThanOrEqual(1);
++    expect(diag.counters.home).toBeGreaterThanOrEqual(1);
++    expect(diag.counters.projectionSwitch).toBeGreaterThanOrEqual(2);
++    expect(diag.counters.preset).toBeGreaterThanOrEqual(6);
++    expect(diag.projections.current).toBe('PERSPECTIVE');
++    expect(diag.presets.TOP).toBeGreaterThanOrEqual(1);
++    expect(diag.presets.FRONT).toBeGreaterThanOrEqual(1);
++    expect(diag.presets.RIGHT).toBeGreaterThanOrEqual(1);
++    expect(diag.presets.BACK).toBeGreaterThanOrEqual(1);
++    expect(diag.presets.LEFT).toBeGreaterThanOrEqual(1);
++    expect(diag.presets.BOTTOM).toBeGreaterThanOrEqual(1);
++    expect(diag.presets.ISO).toBeGreaterThanOrEqual(1);
++
++    expect(diag.samples.fitCompleteP95).toBeLessThanOrEqual(diag._rawState ? Infinity : 700);
++    await expectNoCameraErrors(page);
++    await expectCameraPassHints(page);
++  });
++
++  test('keyboard shortcuts drive camera state and diagnostics', async ({ page }) => {
++    await uploadFixtureGlb(page);
++    await waitForCameraSettled(page, 500);
++
++    await page.keyboard.press(']');
++    await waitForCameraSettled(page, 150);
++    await page.keyboard.press('[');
++    await waitForCameraSettled(page, 150);
++
++    await page.keyboard.press('O');
++    await waitForCameraSettled(page, 200);
++    await expectProjection(page, 'Orthographic');
++
++    await page.keyboard.press('P');
++    await waitForCameraSettled(page, 200);
++    await expectProjection(page, 'Perspective');
++
++    await page.keyboard.press('Shift+T');
++    await waitForCameraSettled(page, 200);
++    await page.keyboard.press('Shift+F');
++    await waitForCameraSettled(page, 200);
++    await page.keyboard.press('I');
++    await waitForCameraSettled(page, 200);
++
++    const diag = await getCameraDiagSnapshot(page);
++    expect(diag.counters.fovChange).toBeGreaterThanOrEqual(2);
++    expect(diag.counters.projectionSwitch).toBeGreaterThanOrEqual(2);
++    expect(diag.counters.preset).toBeGreaterThanOrEqual(3);
++    expect(diag.samples.lastFov).toBeGreaterThanOrEqual(20);
++    expect(diag.samples.lastFov).toBeLessThanOrEqual(120);
++    await expectNoCameraErrors(page);
++  });
++
++  test('camera diagnostics stay within threshold envelope after mixed usage', async ({ page }) => {
++    await uploadFixtureGlb(page);
++    await waitForCameraSettled(page, 500);
++
++    for (let i = 0; i < 3; i += 1) {
++      await clickToolbar(page, 'view:fit');
++      await waitForCameraSettled(page, 200);
++      await clickToolbar(page, 'view:home');
++      await waitForCameraSettled(page, 150);
++      await clickToolbar(page, i % 2 === 0 ? 'view:ortho' : 'view:persp');
++      await waitForCameraSettled(page, 180);
++      await clickToolbar(page, 'view:top');
++      await waitForCameraSettled(page, 150);
++      await clickToolbar(page, 'view:front');
++      await waitForCameraSettled(page, 150);
++      await clickToolbar(page, 'view:iso');
++      await waitForCameraSettled(page, 150);
++    }
++
++    const diag = await getCameraDiagSnapshot(page);
++    expect(diag.passHints.noErrors).toBeTruthy();
++    expect(diag.passHints.fitResponseOk).toBeTruthy();
++    expect(diag.passHints.fitCompleteOk).toBeTruthy();
++    expect(diag.passHints.homeCompleteOk).toBeTruthy();
++    expect(diag.passHints.modeSwitchOk).toBeTruthy();
++    expect(diag.passHints.presetResponseOk).toBeTruthy();
++    expect(diag.passHints.fpsOk).toBeTruthy();
++    expect(diag.counters.cameraLogs).toBeGreaterThanOrEqual(3);
++  });
++});
+```
+
+This spec gives you four useful outcomes:
+
+* it checks that the **camera shell/settings UI** exists and is reachable
+* it validates **projection + FOV + smooth-time persistence**
+* it exercises **fit/home/aligned views/shortcuts**
+* it reads the diagnostics hook and asserts the **camera pass envelope** instead of relying only on visual/manual review. That matches the structured debug and quantitative-validation style already defined in your WI and pass tests.   
+
+Run sequence:
+
+```bash
+npm install
+npx playwright install
+npm run test:e2e
+```
+
+PATCH-6
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+
+Below is a **full UI-shell patch** for the layout in your snap: **top toolbar, left dock, central canvas, right properties dock, bottom debug console, HUD, and hover tooltip**. It keeps the `pro-glb` tab architecture and the shell structure the WI already expects, especially the left panel, toolbar, canvas, floating/property area, and structured debug orientation.  
+
+This patch is intentionally focused on **layout + shell + HUD wiring**. It does **not** try to solve all editing logic in the same step.
+
+---
+
+## Patch
+
+```diff
+diff --git a/viewer/js/pcf2glb/ui/Proglb_HudOverlay.js b/viewer/js/pcf2glb/ui/Proglb_HudOverlay.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/ui/Proglb_HudOverlay.js
+@@ -0,0 +1,143 @@
++export function createHudOverlay(host) {
++  const root = document.createElement('div');
++  root.className = 'proglb-hud-root';
++
++  const topStrip = document.createElement('div');
++  topStrip.className = 'proglb-hud-top';
++
++  const bottomStrip = document.createElement('div');
++  bottomStrip.className = 'proglb-hud-bottom';
++
++  const hoverCard = document.createElement('div');
++  hoverCard.className = 'proglb-hover-card';
++  hoverCard.style.display = 'none';
++
++  root.append(topStrip, bottomStrip, hoverCard);
++  host.appendChild(root);
++
++  function pill(label, value, tone = '') {
++    return `
++      <div class="proglb-hud-pill ${tone}">
++        <span class="proglb-hud-pill-label">${escapeHtml(label)}</span>
++        <span class="proglb-hud-pill-value">${escapeHtml(value ?? '—')}</span>
++      </div>
++    `;
++  }
++
++  return {
++    setStatus(data = {}) {
++      topStrip.innerHTML = [
++        pill('Tool', data.tool || 'Select'),
++        pill('Snap', data.snap || 'Off', data.snap?.startsWith('On') ? 'ok' : 'warn'),
++        pill('Grid', data.grid || '10 mm'),
++        pill('Angle', data.angle || '15°'),
++        pill('View', data.view || 'Perspective'),
++      ].join('');
++
++      bottomStrip.innerHTML = [
++        pill('Selection', data.selection || 'None'),
++        pill('XYZ', data.xyz || '—'),
++        pill('FPS', data.fps != null ? String(data.fps) : '—', (data.fps || 0) >= 30 ? 'ok' : 'warn'),
++      ].join('');
++    },
++
++    showHover({ x = 0, y = 0, title = '', rows = [] } = {}) {
++      hoverCard.style.display = 'block';
++      hoverCard.style.left = `${x + 18}px`;
++      hoverCard.style.top = `${y + 18}px`;
++      hoverCard.innerHTML = `
++        <div class="proglb-hover-title">${escapeHtml(title || 'Hover')}</div>
++        <div class="proglb-hover-rows">
++          ${rows.map(r => `
++            <div class="proglb-hover-row">
++              <span class="proglb-hover-key">${escapeHtml(r.key)}</span>
++              <span class="proglb-hover-val">${escapeHtml(r.value)}</span>
++            </div>
++          `).join('')}
++        </div>
++      `;
++    },
++
++    hideHover() {
++      hoverCard.style.display = 'none';
++      hoverCard.innerHTML = '';
++    },
++
++    destroy() {
++      root.remove();
++    }
++  };
++}
++
++function escapeHtml(value) {
++  return String(value ?? '')
++    .replace(/&/g, '&amp;')
++    .replace(/</g, '&lt;')
++    .replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;')
++    .replace(/'/g, '&#39;');
++}
+diff --git a/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js
+@@ -0,0 +1,643 @@
++import { createViewerApp } from '../advanced/createViewerApp.js';
++import { createHudOverlay } from './Proglb_HudOverlay.js';
++
++export function renderProGlbViewerPanel(container) {
++  injectStyles();
++
++  container.innerHTML = `
++    <div id="proglb-root" class="proglb-shell">
++      <header class="proglb-topbar">
++        <div class="proglb-topbar-row proglb-topbar-row-main">
++          <button class="proglb-btn" data-action="import">Import</button>
++          <button class="proglb-btn" data-action="export">Export</button>
++          <button class="proglb-btn" data-action="undo">Undo</button>
++          <button class="proglb-btn" data-action="redo">Redo</button>
++          <button class="proglb-btn active" data-action="select">Select</button>
++          <button class="proglb-btn" data-action="move">Move</button>
++          <button class="proglb-btn" data-action="rotate">Rotate</button>
++          <button class="proglb-btn" data-action="fitting">Fitting</button>
++          <button class="proglb-btn" data-action="support">Support</button>
++          <button class="proglb-btn" data-action="cut">Cut</button>
++          <div class="proglb-spacer"></div>
++          <button class="proglb-btn" data-action="views-menu">Views ▾</button>
++        </div>
++
++        <div class="proglb-topbar-row proglb-topbar-row-sub">
++          <button class="proglb-linkbtn" data-action="toggle-snap">Snap: <span id="proglb-snap-state">On</span> ▾</button>
++          <div class="proglb-inline-setting">Grid: <span id="proglb-grid-state">10mm</span></div>
++          <div class="proglb-inline-setting">Angle: <span id="proglb-angle-state">15°</span></div>
++          <button class="proglb-linkbtn" data-action="toggle-projection">Ortho / Persp</button>
++          <button class="proglb-linkbtn" data-action="fit">Fit</button>
++          <button class="proglb-linkbtn" data-action="home">Home</button>
++          <button class="proglb-linkbtn" data-action="quick-views">Views ▾</button>
++        </div>
++      </header>
++
++      <section class="proglb-middle">
++        <aside class="proglb-leftdock">
++          <div class="proglb-dock-tabs">
++            <button class="proglb-dock-tab active" data-pane="model">Model</button>
++            <button class="proglb-dock-tab" data-pane="tools">Tools</button>
++            <button class="proglb-dock-tab" data-pane="annotations">Annotations</button>
++          </div>
++
++          <div class="proglb-dock-body">
++            <div class="proglb-pane active" data-pane="model">
++              <div class="proglb-tree-header">
++                <span>Plant Model</span>
++                <button class="proglb-iconbtn">☰</button>
++              </div>
++
++              <div class="proglb-tree-wrap">
++                <div id="proglb-model-tree" class="proglb-tree">
++                  <div class="proglb-tree-node expanded">
++                    <div class="proglb-tree-line">▾ <strong>Plant Model</strong></div>
++                    <div class="proglb-tree-children">
++                      <div class="proglb-tree-line">▸ Pipes</div>
++                      <div class="proglb-tree-line">▸ Valves</div>
++                      <div class="proglb-tree-line">▸ Supports</div>
++                    </div>
++                  </div>
++                </div>
++              </div>
++
++              <div class="proglb-searchbox">
++                <input id="proglb-search" type="text" placeholder="Search..." />
++              </div>
++
++              <div class="proglb-left-actions">
++                <button class="proglb-btn minor">Isolate</button>
++                <button class="proglb-btn minor">Layers</button>
++              </div>
++            </div>
++
++            <div class="proglb-pane" data-pane="tools">
++              <div class="proglb-panel-title">Tools</div>
++              <div class="proglb-form-grid">
++                <label>Projection</label>
++                <select id="proglb-projection-select">
++                  <option value="PERSPECTIVE">Perspective</option>
++                  <option value="ORTHOGRAPHIC">Orthographic</option>
++                </select>
++
++                <label>Snap</label>
++                <select id="proglb-snap-select">
++                  <option value="on">On</option>
++                  <option value="off">Off</option>
++                </select>
++
++                <label>Grid</label>
++                <input id="proglb-grid-input" type="number" min="1" step="1" value="10" />
++
++                <label>Angle</label>
++                <input id="proglb-angle-input" type="number" min="1" step="1" value="15" />
++
++                <label>FOV</label>
++                <input id="proglb-fov-input" type="range" min="20" max="120" step="1" value="60" />
++
++                <label>Smooth</label>
++                <input id="proglb-smooth-input" type="range" min="0" max="2" step="0.05" value="0.35" />
++              </div>
++            </div>
++
++            <div class="proglb-pane" data-pane="annotations">
++              <div class="proglb-panel-title">Annotations</div>
++              <div class="proglb-empty-note">
++                Annotation workflow can be wired into this dock later.
++              </div>
++            </div>
++          </div>
++        </aside>
++
++        <main class="proglb-canvas-region">
++          <div id="proglb-preview" class="proglb-preview"></div>
++          <div id="proglb-hidden-toolbar" style="display:none;"></div>
++        </main>
++
++        <aside class="proglb-rightdock">
++          <div class="proglb-right-header">
++            <span>Properties</span>
++            <button class="proglb-iconbtn">▾</button>
++          </div>
++
++          <div id="proglb-empty-props" class="proglb-empty-note">
++            Select an item to view properties.
++          </div>
++
++          <div id="proglb-properties-panel" class="proglb-properties-panel" style="display:none;">
++            <div id="proglb-properties-content"></div>
++          </div>
++        </aside>
++      </section>
++
++      <footer class="proglb-bottomdock">
++        <div class="proglb-bottom-header">
++          <div class="proglb-bottom-left">
++            <span class="proglb-debug-title">Debug Console</span>
++            <button class="proglb-filter active">All</button>
++            <button class="proglb-filter">Camera</button>
++            <button class="proglb-filter">Edit</button>
++            <button class="proglb-filter">Perf</button>
++            <button class="proglb-filter">Error</button>
++            <button class="proglb-filter">Warning</button>
++            <button class="proglb-filter">Info</button>
++          </div>
++          <div class="proglb-bottom-right">
++            <button class="proglb-btn minor">Export Log</button>
++            <button class="proglb-btn minor">Copy JSON</button>
++          </div>
++        </div>
++        <div id="proglb-debug-logs" class="proglb-debug-logs"></div>
++      </footer>
++
++      <input id="proglb-file-input" type="file" accept=".glb,.gltf" style="display:none;" />
++    </div>
++  `;
++
++  const root = container.querySelector('#proglb-root');
++  const preview = root.querySelector('#proglb-preview');
++  const hiddenToolbar = root.querySelector('#proglb-hidden-toolbar');
++  const propPanel = root.querySelector('#proglb-properties-panel');
++  const propContent = root.querySelector('#proglb-properties-content');
++  const emptyProps = root.querySelector('#proglb-empty-props');
++  const debugLogs = root.querySelector('#proglb-debug-logs');
++  const fileInput = root.querySelector('#proglb-file-input');
++
++  const state = {
++    tool: 'Select',
++    snap: 'On',
++    grid: 10,
++    angle: 15,
++    projection: 'PERSPECTIVE',
++    fps: 0,
++    objectUrl: null,
++    destroyed: false,
++    perfHandle: 0,
++    hoverHandle: 0,
++    frames: 0,
++    lastPerfTs: performance.now(),
++    selectionLabel: 'None',
++  };
++
++  const hud = createHudOverlay(preview);
++
++  const viewer = createViewerApp(
++    preview,
++    hiddenToolbar,
++    propPanel,
++    propContent,
++    debugLogs,
++    {
++      disableInternalToolbar: true,
++      onSceneLoaded: ({ sceneIndex }) => {
++        rebuildModelTree(sceneIndex);
++        addLog('INFO', 'SCENE', `Loaded scene with ${sceneIndex?.items?.length ?? 0} indexed objects`);
++        updateHud();
++      },
++      onSelectionChange: (item) => {
++        if (item) {
++          emptyProps.style.display = 'none';
++          propPanel.style.display = 'block';
++          state.selectionLabel = item.id || item.refNo || item.type || 'Selected';
++        } else {
++          emptyProps.style.display = 'block';
++          propPanel.style.display = 'none';
++          state.selectionLabel = 'None';
++        }
++        updateHud();
++      },
++      onFrame: () => {
++        state.frames += 1;
++      }
++    }
++  );
++
++  wireToolbar();
++  wireLeftDock();
++  wireHover();
++  startPerfLoop();
++  updateHud();
++  addLog('INFO', 'UI', 'Professional shell mounted');
++
++  return {
++    destroy() {
++      state.destroyed = true;
++      if (state.perfHandle) cancelAnimationFrame(state.perfHandle);
++      if (state.hoverHandle) cancelAnimationFrame(state.hoverHandle);
++      hud.destroy();
++      viewer.dispose();
++      if (state.objectUrl) {
++        URL.revokeObjectURL(state.objectUrl);
++        state.objectUrl = null;
++      }
++    }
++  };
++
++  function wireToolbar() {
++    root.querySelectorAll('[data-action]').forEach(btn => {
++      btn.addEventListener('click', async () => {
++        const action = btn.dataset.action;
++
++        if (action === 'import') {
++          fileInput.click();
++          return;
++        }
++
++        if (action === 'select') return setTool('Select');
++        if (action === 'move') return setTool('Move');
++        if (action === 'rotate') return setTool('Rotate');
++        if (action === 'fitting') return setTool('Fitting');
++        if (action === 'support') return setTool('Support');
++        if (action === 'cut') return setTool('Cut');
++
++        if (action === 'toggle-snap') {
++          state.snap = state.snap === 'On' ? 'Off' : 'On';
++          root.querySelector('#proglb-snap-state').textContent = state.snap;
++          root.querySelector('#proglb-snap-select').value = state.snap.toLowerCase();
++          addLog('INFO', 'UI', `Snap ${state.snap}`);
++          return updateHud();
++        }
++
++        if (action === 'toggle-projection') {
++          state.projection = state.projection === 'PERSPECTIVE' ? 'ORTHOGRAPHIC' : 'PERSPECTIVE';
++          root.querySelector('#proglb-projection-select').value = state.projection;
++          viewer.setProjection?.(state.projection);
++          addLog('INFO', 'CAMERA', `Projection ${state.projection}`);
++          return updateHud();
++        }
++
++        if (action === 'fit') {
++          viewer.fitAll?.();
++          addLog('INFO', 'CAMERA', 'Fit model');
++          return updateHud();
++        }
++
++        if (action === 'home') {
++          viewer.home?.();
++          addLog('INFO', 'CAMERA', 'Home view');
++          return updateHud();
++        }
++
++        addLog('WARN', 'UI', `${action} clicked (not yet wired)`);
++      });
++    });
++
++    fileInput.addEventListener('change', async (ev) => {
++      const file = ev.target.files?.[0];
++      if (!file) return;
++
++      if (state.objectUrl) {
++        URL.revokeObjectURL(state.objectUrl);
++        state.objectUrl = null;
++      }
++
++      state.objectUrl = URL.createObjectURL(file);
++      addLog('INFO', 'IMPORT', `Loading ${file.name}`);
++
++      try {
++        await viewer.loadGLB(state.objectUrl);
++        viewer.fitAll?.();
++        addLog('INFO', 'IMPORT', `Loaded ${file.name}`);
++      } catch (err) {
++        addLog('ERROR', 'IMPORT', `Failed ${file.name}: ${err?.message || String(err)}`);
++      }
++    });
++  }
++
++  function wireLeftDock() {
++    root.querySelectorAll('.proglb-dock-tab').forEach(tab => {
++      tab.addEventListener('click', () => {
++        const pane = tab.dataset.pane;
++        root.querySelectorAll('.proglb-dock-tab').forEach(x => x.classList.toggle('active', x === tab));
++        root.querySelectorAll('.proglb-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === pane));
++      });
++    });
++
++    root.querySelector('#proglb-projection-select').addEventListener('change', (e) => {
++      state.projection = String(e.target.value || 'PERSPECTIVE').toUpperCase();
++      viewer.setProjection?.(state.projection);
++      addLog('INFO', 'CAMERA', `Projection ${state.projection}`);
++      updateHud();
++    });
++
++    root.querySelector('#proglb-snap-select').addEventListener('change', (e) => {
++      state.snap = e.target.value === 'off' ? 'Off' : 'On';
++      root.querySelector('#proglb-snap-state').textContent = state.snap;
++      updateHud();
++    });
++
++    root.querySelector('#proglb-grid-input').addEventListener('change', (e) => {
++      state.grid = Math.max(1, Number(e.target.value) || 10);
++      root.querySelector('#proglb-grid-state').textContent = `${state.grid}mm`;
++      updateHud();
++    });
++
++    root.querySelector('#proglb-angle-input').addEventListener('change', (e) => {
++      state.angle = Math.max(1, Number(e.target.value) || 15);
++      root.querySelector('#proglb-angle-state').textContent = `${state.angle}°`;
++      updateHud();
++    });
++
++    root.querySelector('#proglb-fov-input').addEventListener('input', (e) => {
++      const value = Math.max(20, Math.min(120, Number(e.target.value) || 60));
++      viewer.getController?.().setPerspectiveFov?.(value);
++      addLog('INFO', 'CAMERA', `FOV ${value}`);
++      updateHud();
++    });
++
++    root.querySelector('#proglb-smooth-input').addEventListener('input', (e) => {
++      const value = Math.max(0, Math.min(2, Number(e.target.value) || 0.35));
++      viewer.getController?.().setSmoothTime?.(value);
++      addLog('INFO', 'CAMERA', `Smooth ${value}`);
++    });
++  }
++
++  function wireHover() {
++    preview.addEventListener('pointerleave', () => {
++      hud.hideHover();
++    });
++
++    preview.addEventListener('pointermove', (event) => {
++      if (state.hoverHandle) cancelAnimationFrame(state.hoverHandle);
++      state.hoverHandle = requestAnimationFrame(() => {
++        const picked = viewer.pickAtClient?.(event.clientX, event.clientY);
++
++        if (!picked || !picked.hit) {
++          hud.hideHover();
++          updateHud();
++          return;
++        }
++
++        const point = picked.hit.point;
++        const item = picked.item;
++
++        hud.showHover({
++          x: event.offsetX,
++          y: event.offsetY,
++          title: item?.type || picked.object?.userData?.pcfType || 'Component',
++          rows: [
++            { key: 'Id', value: item?.id || picked.object?.userData?.pcfId || '—' },
++            { key: 'Ref', value: item?.refNo || picked.object?.userData?.REF_NO || '—' },
++            { key: 'XYZ', value: `${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}` },
++          ]
++        });
++
++        updateHud(`${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}`);
++      });
++    });
++  }
++
++  function setTool(tool) {
++    state.tool = tool;
++    root.querySelectorAll('.proglb-topbar-row-main .proglb-btn').forEach(btn => {
++      const isTool = ['select', 'move', 'rotate', 'fitting', 'support', 'cut'].includes(btn.dataset.action);
++      if (isTool) btn.classList.toggle('active', btn.textContent.trim().toLowerCase() === tool.toLowerCase());
++    });
++    addLog('INFO', 'EDIT', `${tool} mode`);
++    updateHud();
++  }
++
++  function updateHud(xyz = '—') {
++    const viewText = state.projection === 'ORTHOGRAPHIC'
++      ? `Ortho · ${viewer.getController?.().getPresetView?.() || 'ISO'}`
++      : `Persp · ${viewer.getController?.().getPresetView?.() || 'ISO'}`;
++
++    hud.setStatus({
++      tool: state.tool,
++      snap: state.snap,
++      grid: `${state.grid}mm`,
++      angle: `${state.angle}°`,
++      view: viewText,
++      selection: state.selectionLabel,
++      xyz,
++      fps: state.fps,
++    });
++  }
++
++  function startPerfLoop() {
++    function tick(ts) {
++      if (state.destroyed) return;
++
++      const dt = ts - state.lastPerfTs;
++      if (dt >= 500) {
++        state.fps = Math.round((state.frames * 1000) / dt);
++        state.frames = 0;
++        state.lastPerfTs = ts;
++        updateHud();
++      }
++
++      state.perfHandle = requestAnimationFrame(tick);
++    }
++
++    state.perfHandle = requestAnimationFrame(tick);
++  }
++
++  function rebuildModelTree(sceneIndex) {
++    const el = root.querySelector('#proglb-model-tree');
++    const items = sceneIndex?.items || [];
++
++    if (!items.length) {
++      el.innerHTML = `<div class="proglb-empty-note">No indexed items.</div>`;
++      return;
++    }
++
++    el.innerHTML = `
++      <div class="proglb-tree-node expanded">
++        <div class="proglb-tree-line">▾ <strong>Plant Model</strong></div>
++        <div class="proglb-tree-children">
++          ${items.slice(0, 60).map(item => `
++            <div class="proglb-tree-line">
++              ▸ ${escapeHtml(item.type || 'ITEM')}
++              <span class="proglb-tree-meta">${escapeHtml(item.id || item.refNo || '—')}</span>
++            </div>
++          `).join('')}
++        </div>
++      </div>
++    `;
++  }
++
++  function addLog(level, channel, message) {
++    const line = document.createElement('div');
++    line.className = 'proglb-log-row';
++    line.innerHTML = `
++      <span class="proglb-log-level ${level.toLowerCase()}">[${escapeHtml(level)}]</span>
++      <span class="proglb-log-chan">[${escapeHtml(channel)}]</span>
++      <span class="proglb-log-msg">${escapeHtml(message)}</span>
++    `;
++    debugLogs.prepend(line);
++    while (debugLogs.childElementCount > 150) {
++      debugLogs.lastElementChild?.remove();
++    }
++  }
++}
++
++function escapeHtml(value) {
++  return String(value ?? '')
++    .replace(/&/g, '&amp;')
++    .replace(/</g, '&lt;')
++    .replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;')
++    .replace(/'/g, '&#39;');
++}
++
++let __proglbStylesInjected = false;
++
++function injectStyles() {
++  if (__proglbStylesInjected) return;
++  __proglbStylesInjected = true;
++
++  const style = document.createElement('style');
++  style.textContent = `
++    .proglb-shell {
++      height: calc(100vh - 120px);
++      min-height: 720px;
++      display: grid;
++      grid-template-rows: 88px 1fr 260px;
++      background:
++        linear-gradient(180deg, #11161d 0%, #0b0f14 100%);
++      color: #e8edf5;
++      border: 1px solid #1b2430;
++      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
++      font-family: "Segoe UI", Arial, sans-serif;
++    }
++
++    .proglb-topbar {
++      display: grid;
++      grid-template-rows: 52px 36px;
++      border-bottom: 1px solid #252f3a;
++      background: linear-gradient(180deg, #2a313c 0%, #161d26 55%, #111821 100%);
++      box-shadow: inset 0 -1px 0 rgba(255,255,255,0.03);
++    }
++
++    .proglb-topbar-row {
++      display: flex;
++      align-items: center;
++      gap: 8px;
++      padding: 0 14px;
++    }
++
++    .proglb-topbar-row-main {
++      border-bottom: 1px solid rgba(255,255,255,0.06);
++    }
++
++    .proglb-btn,
++    .proglb-linkbtn,
++    .proglb-iconbtn,
++    .proglb-dock-tab,
++    .proglb-filter {
++      border: 1px solid #3a4552;
++      background: linear-gradient(180deg, #3b4450 0%, #252d38 100%);
++      color: #eef3fa;
++      border-radius: 3px;
++      cursor: pointer;
++      transition: .16s ease;
++    }
++
++    .proglb-btn,
++    .proglb-filter {
++      padding: 8px 14px;
++      font-size: 13px;
++      font-weight: 600;
++    }
++
++    .proglb-btn.minor {
++      padding: 7px 14px;
++      font-size: 12px;
++      font-weight: 600;
++    }
++
++    .proglb-linkbtn {
++      padding: 4px 6px;
++      border: 0;
++      background: transparent;
++      color: #f0f4f9;
++      font-size: 15px;
++      font-weight: 600;
++    }
++
++    .proglb-inline-setting {
++      color: #e3edf8;
++      font-size: 14px;
++      font-weight: 600;
++    }
++
++    .proglb-btn:hover,
++    .proglb-linkbtn:hover,
++    .proglb-iconbtn:hover,
++    .proglb-dock-tab:hover,
++    .proglb-filter:hover {
++      filter: brightness(1.08);
++    }
++
++    .proglb-btn.active,
++    .proglb-dock-tab.active,
++    .proglb-filter.active {
++      background: linear-gradient(180deg, #496182 0%, #2b4361 100%);
++      border-color: #5477a3;
++    }
++
++    .proglb-iconbtn {
++      width: 32px;
++      height: 32px;
++      display: inline-flex;
++      align-items: center;
++      justify-content: center;
++      padding: 0;
++    }
++
++    .proglb-spacer {
++      flex: 1;
++    }
++
++    .proglb-middle {
++      min-height: 0;
++      display: grid;
++      grid-template-columns: 350px 1fr 330px;
++      gap: 0;
++    }
++
++    .proglb-leftdock,
++    .proglb-rightdock {
++      min-height: 0;
++      background:
++        radial-gradient(circle at 20% 20%, rgba(76, 104, 148, 0.12), transparent 45%),
++        linear-gradient(180deg, #1a2029 0%, #121821 100%);
++      border-right: 1px solid #232e3a;
++      box-shadow: inset -1px 0 0 rgba(255,255,255,0.03);
++    }
++
++    .proglb-rightdock {
++      border-right: 0;
++      border-left: 1px solid #232e3a;
++      box-shadow: inset 1px 0 0 rgba(255,255,255,0.03);
++    }
++
++    .proglb-dock-tabs {
++      display: flex;
++      border-bottom: 1px solid #27323f;
++    }
++
++    .proglb-dock-tab {
++      flex: 1;
++      padding: 12px 10px;
++      border-radius: 0;
++      border: 0;
++      border-right: 1px solid #27323f;
++      background: linear-gradient(180deg, #1a2230 0%, #131a22 100%);
++      font-size: 14px;
++      font-weight: 600;
++    }
++
++    .proglb-dock-body {
++      min-height: 0;
++      height: calc(100% - 49px);
++      position: relative;
++    }
++
++    .proglb-pane {
++      display: none;
++      position: absolute;
++      inset: 0;
++      padding: 12px;
++      overflow: auto;
++    }
++
++    .proglb-pane.active {
++      display: block;
++    }
++
++    .proglb-tree-header,
++    .proglb-right-header {
++      display: flex;
++      align-items: center;
++      justify-content: space-between;
++      padding: 10px 12px;
++      margin-bottom: 10px;
++      border: 1px solid #2d3946;
++      background: linear-gradient(180deg, #2b3440 0%, #202833 100%);
++      font-size: 15px;
++      font-weight: 700;
++    }
++
++    .proglb-tree-wrap {
++      height: calc(100% - 126px);
++      min-height: 240px;
++      border: 1px solid #293544;
++      background: rgba(8, 12, 18, 0.22);
++      overflow: auto;
++      padding: 10px 12px;
++      box-sizing: border-box;
++    }
++
++    .proglb-tree-line {
++      padding: 6px 0;
++      font-size: 14px;
++      color: #e7edf7;
++      border-bottom: 1px solid rgba(255,255,255,0.03);
++    }
++
++    .proglb-tree-meta {
++      color: #8ea5c0;
++      margin-left: 8px;
++      font-size: 12px;
++    }
++
++    .proglb-tree-children {
++      margin-left: 16px;
++    }
++
++    .proglb-searchbox {
++      margin-top: 10px;
++    }
++
++    .proglb-searchbox input,
++    .proglb-form-grid input,
++    .proglb-form-grid select {
++      width: 100%;
++      box-sizing: border-box;
++      border: 1px solid #334150;
++      background: #101720;
++      color: #edf3fb;
++      border-radius: 4px;
++      padding: 9px 10px;
++      font-size: 13px;
++    }
++
++    .proglb-left-actions {
++      display: flex;
++      gap: 10px;
++      margin-top: 12px;
++    }
++
++    .proglb-panel-title {
++      font-size: 16px;
++      font-weight: 700;
++      margin-bottom: 12px;
++      color: #eef3fb;
++    }
++
++    .proglb-form-grid {
++      display: grid;
++      grid-template-columns: 80px 1fr;
++      gap: 10px 12px;
++      align-items: center;
++    }
++
++    .proglb-form-grid label {
++      font-size: 13px;
++      color: #9fb4cc;
++    }
++
++    .proglb-empty-note {
++      padding: 12px;
++      color: #93a8bf;
++      font-size: 13px;
++      line-height: 1.6;
++    }
++
++    .proglb-canvas-region {
++      position: relative;
++      min-width: 0;
++      min-height: 0;
++      background:
++        radial-gradient(circle at 50% 35%, rgba(140,160,185,0.17), rgba(24,31,40,0.18) 40%, rgba(12,16,22,0.7) 100%),
++        #181f28;
++      border-left: 1px solid rgba(255,255,255,0.03);
++      border-right: 1px solid rgba(255,255,255,0.03);
++    }
++
++    .proglb-preview {
++      position: absolute;
++      inset: 8px;
++      border: 1px solid #2d3946;
++      background: #222a35;
++      overflow: hidden;
++    }
++
++    .proglb-right-header {
++      margin: 12px;
++      margin-bottom: 10px;
++    }
++
++    .proglb-properties-panel {
++      height: calc(100% - 74px);
++      overflow: auto;
++      padding: 0 12px 12px;
++      box-sizing: border-box;
++    }
++
++    .proglb-bottomdock {
++      min-height: 0;
++      border-top: 1px solid #25303b;
++      background:
++        radial-gradient(circle at 20% 20%, rgba(81,108,150,0.08), transparent 35%),
++        linear-gradient(180deg, #171d26 0%, #10151d 100%);
++      display: grid;
++      grid-template-rows: 50px 1fr;
++    }
++
++    .proglb-bottom-header {
++      display: flex;
++      align-items: center;
++      justify-content: space-between;
++      padding: 0 12px;
++      border-bottom: 1px solid #27323f;
++    }
++
++    .proglb-bottom-left,
++    .proglb-bottom-right {
++      display: flex;
++      align-items: center;
++      gap: 8px;
++      min-width: 0;
++      flex-wrap: wrap;
++    }
++
++    .proglb-debug-title {
++      font-size: 16px;
++      font-weight: 700;
++      margin-right: 8px;
++    }
++
++    .proglb-debug-logs {
++      overflow: auto;
++      padding: 10px 14px;
++      font-family: Consolas, "Courier New", monospace;
++      font-size: 13px;
++      line-height: 1.55;
++    }
++
++    .proglb-log-row {
++      padding: 8px 0;
++      border-bottom: 1px solid rgba(255,255,255,0.05);
++    }
++
++    .proglb-log-level {
++      font-weight: 700;
++      margin-right: 10px;
++    }
++    .proglb-log-level.info { color: #8fda6f; }
++    .proglb-log-level.warn { color: #ffd166; }
++    .proglb-log-level.error { color: #ff7b7b; }
++
++    .proglb-log-chan {
++      color: #7fb4ff;
++      margin-right: 10px;
++    }
++
++    .proglb-log-msg {
++      color: #ecf2f9;
++    }
++
++    .proglb-hud-root {
++      position: absolute;
++      inset: 0;
++      z-index: 8;
++      pointer-events: none;
++      font-family: "Segoe UI", Arial, sans-serif;
++    }
++
++    .proglb-hud-top {
++      position: absolute;
++      left: 14px;
++      top: 14px;
++      display: flex;
++      gap: 8px;
++      flex-wrap: wrap;
++      max-width: 75%;
++    }
++
++    .proglb-hud-bottom {
++      position: absolute;
++      left: 14px;
++      bottom: 14px;
++      display: flex;
++      gap: 8px;
++      flex-wrap: wrap;
++      max-width: 80%;
++    }
++
++    .proglb-hud-pill {
++      display: flex;
++      align-items: center;
++      gap: 8px;
++      padding: 7px 11px;
++      border: 1px solid rgba(255,255,255,0.1);
++      border-radius: 999px;
++      background: rgba(10,14,20,0.88);
++      backdrop-filter: blur(3px);
++      box-shadow: 0 10px 26px rgba(0,0,0,0.25);
++    }
++
++    .proglb-hud-pill.ok .proglb-hud-pill-value { color: #80e6a7; }
++    .proglb-hud-pill.warn .proglb-hud-pill-value { color: #ffd166; }
++
++    .proglb-hud-pill-label {
++      color: #8ea5bf;
++      font-size: 11px;
++      text-transform: uppercase;
++      letter-spacing: .06em;
++    }
++
++    .proglb-hud-pill-value {
++      color: #edf4fc;
++      font-size: 12px;
++      font-weight: 700;
++    }
++
++    .proglb-hover-card {
++      position: absolute;
++      min-width: 220px;
++      max-width: 320px;
++      padding: 10px 12px;
++      border-radius: 8px;
++      background: rgba(8,12,18,0.92);
++      border: 1px solid rgba(255,255,255,0.12);
++      color: #eaf1fa;
++      box-shadow: 0 14px 28px rgba(0,0,0,0.34);
++    }
++
++    .proglb-hover-title {
++      font-size: 16px;
++      font-weight: 700;
++      margin-bottom: 8px;
++    }
++
++    .proglb-hover-row {
++      display: grid;
++      grid-template-columns: 54px 1fr;
++      gap: 10px;
++      padding: 4px 0;
++      font-size: 12px;
++    }
++
++    .proglb-hover-key {
++      color: #8ea5bf;
++      font-weight: 600;
++    }
++
++    .proglb-hover-val {
++      color: #edf4fc;
++      word-break: break-word;
++    }
++
++    @media (max-width: 1400px) {
++      .proglb-middle {
++        grid-template-columns: 300px 1fr 290px;
++      }
++    }
++
++    @media (max-width: 1200px) {
++      .proglb-shell {
++        grid-template-rows: 100px 1fr 220px;
++      }
++      .proglb-middle {
++        grid-template-columns: 260px 1fr 260px;
++      }
++    }
++  `;
++  document.head.appendChild(style);
++}
+diff --git a/viewer/core/app.js b/viewer/core/app.js
+index 1111111..2222222 100644
+--- a/viewer/core/app.js
++++ b/viewer/core/app.js
+@@ -17,6 +17,7 @@ import { renderLinelist } from '../tabs/linelist-tab.js';
+ import { renderPcfGlbExporterPanel } from '../js/pcf2glb/ui/PcfGlbExporterPanel.js';
+ import { renderAdvancedGlbViewerPanel } from '../js/pcf2glb/ui/AdvancedGlbViewerPanel.js';
++import { renderProGlbViewerPanel } from '../js/pcf2glb/ui/Proglb_ProGlbViewerPanel.js';
+
+ const ALL_TABS = [
+   { id: 'input', label: 'Input Data', render: renderInput },
+@@ -38,6 +39,7 @@ const ALL_TABS = [
+   { id: 'logs', label: 'Log', render: renderLogs },
+   { id: 'glb-export', label: 'Simple GLB Exporter', render: renderPcfGlbExporterPanel },
+   { id: 'adv-glb', label: 'Advanced GLB Viewer', render: renderAdvancedGlbViewerPanel },
++  { id: 'pro-glb', label: 'Pro GLB Viewer', render: renderProGlbViewerPanel },
+   { id: 'debug', label: 'Debug', render: renderDebug },
+ ];
+```
+
+---
+
+## What this gives you
+
+This code gives you the **full professional shell layout** shown in the snap:
+
+* **top toolbar** with two stacked rows
+* **left dock** with tabs for Model / Tools / Annotations
+* **center canvas region**
+* **right dock** for properties
+* **bottom debug dock**
+* **HUD pills**
+* **hover tooltip card**
+* **file import hook**
+* **basic toolbar interactions**
+* **responsive desktop layout**
+
+It also keeps the viewer runtime embedded through `createViewerApp(...)`, so you are not building a fake mock layout — you are wrapping the real 3D viewer surface in the target shell. That matches the direction already established in your Pro GLB Viewer work instruction. 
+
+---
+
+## Why this is the right next step
+
+Your current issue is not just “missing buttons”; it is that the app still feels like a utility panel rather than a **professional 3D workspace**. The snap you shared implies four distinct UI layers:
+
+1. **Command layer** — top toolbar
+2. **Navigation / structure layer** — left dock
+3. **Spatial interaction layer** — center canvas with HUD + hover
+4. **Inspection / diagnostics layer** — right dock + bottom console
+
+That layout separation is exactly what makes tools like Navisworks/Revit-style editors feel professional.
+
+---
+
+## What to wire next after this shell
+
+After this patch, the next clean steps are:
+
+* connect toolbar tools to real editing actions
+* connect model tree clicks to selection/focus
+* convert bottom console filters into real channel filtering
+* enrich hover with component schema fields
+* add keyboard shortcuts and status reflection in HUD
+* add dock resize handles
+
+---
+
+## Important note
+
+This patch assumes your existing `createViewerApp(...)` already supports the same hooks we discussed earlier:
+
+* `loadGLB`
+* `fitAll`
+* `home`
+* `setProjection`
+* `getController`
+* `pickAtClient`
+* `dispose`
+
+PATCH-7
+(DO NOT APPLY PATCH TO VIEWER, ONLY SHOWN FOR UNDERSTANDING, FIRST  COPY VIEWCODE TO Pro3DGLBEditor_... then Patch)
+
+Below is the **companion patch** for `createViewerApp.js`, `createCameraController.js`, and `createSelection.js` so the UI shell patch becomes **runnable end-to-end** with:
+
+* `loadGLB`
+* `fitAll`
+* `home`
+* `setProjection`
+* `getController`
+* `pickAtClient`
+* `dispose`
+
+This follows the same direction already established in your WI: reuse the existing advanced viewer modules, keep the `pro-glb` tab architecture, and expose camera/viewer hooks needed by the shell, HUD, hover, and pass-test flows.  
+
+---
+
+## Companion patch
+
+```diff
+diff --git a/viewer/js/pcf2glb/advanced/createCameraController.js b/viewer/js/pcf2glb/advanced/createCameraController.js
+new file mode 100644
+--- /dev/null
++++ b/viewer/js/pcf2glb/advanced/createCameraController.js
+@@ -0,0 +1,247 @@
++import * as THREE from 'three';
++import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
++
++export function createCameraController(camera, domElement) {
++  const perspectiveCamera = camera;
++  const aspect = Math.max(1, domElement.clientWidth / Math.max(1, domElement.clientHeight));
++  perspectiveCamera.aspect = aspect;
++  perspectiveCamera.fov = perspectiveCamera.fov || 60;
++  perspectiveCamera.near = perspectiveCamera.near || 0.1;
++  perspectiveCamera.far = perspectiveCamera.far || 10000000;
++  perspectiveCamera.updateProjectionMatrix();
++
++  const orthoCamera = new THREE.OrthographicCamera(
++    -100 * aspect,
++     100 * aspect,
++     100,
++    -100,
++    perspectiveCamera.near,
++    perspectiveCamera.far
++  );
++  orthoCamera.position.copy(perspectiveCamera.position);
++  orthoCamera.quaternion.copy(perspectiveCamera.quaternion);
++  orthoCamera.up.copy(perspectiveCamera.up);
++  orthoCamera.updateProjectionMatrix();
++
++  const controls = new OrbitControls(perspectiveCamera, domElement);
++  controls.enableDamping = true;
++  controls.dampingFactor = 0.05;
++  controls.screenSpacePanning = true;
++
++  let activeCamera = perspectiveCamera;
++  let projectionMode = 'PERSPECTIVE';
++  let currentCenter = new THREE.Vector3(0, 0, 0);
++  let currentDistance = 100;
++  let currentBounds = null;
++  let currentPreset = 'ISO';
++  let smoothTime = 0.35;
++
++  const homePosition = new THREE.Vector3(100, 100, 100);
++  const homeTarget = new THREE.Vector3(0, 0, 0);
++  let homeMode = 'PERSPECTIVE';
++
++  return {
++    controls,
++
++    fitScene(sceneRoot) {
++      if (!sceneRoot || !sceneRoot.children?.length) return;
++      const box = new THREE.Box3().setFromObject(sceneRoot);
++      if (box.isEmpty()) return;
++      fitBox(box);
++    },
++
++    fitObject(object3D) {
++      if (!object3D) return;
++      const box = new THREE.Box3().setFromObject(object3D);
++      if (box.isEmpty()) return;
++      fitBox(box);
++    },
++
++    resetTarget() {
++      controls.target.copy(currentCenter || homeTarget);
++      controls.update();
++    },
++
++    resetHome() {
++      setProjection(homeMode);
++      activeCamera.position.copy(homePosition);
++      controls.target.copy(homeTarget);
++      activeCamera.lookAt(homeTarget);
++      syncInactiveCamera();
++      controls.update();
++    },
++
++    setPresetView(name) {
++      currentPreset = String(name || 'ISO').toUpperCase();
++      const center = currentCenter?.clone?.() || controls.target.clone();
++      const distance = Math.max(1, currentDistance || activeCamera.position.distanceTo(controls.target) || 100);
++
++      let dir = new THREE.Vector3(1, 1, 1);
++      let up = new THREE.Vector3(0, 1, 0);
++
++      switch (currentPreset) {
++        case 'TOP':
++          dir.set(0, 1, 0);
++          up.set(0, 0, -1);
++          break;
++        case 'BOTTOM':
++          dir.set(0, -1, 0);
++          up.set(0, 0, 1);
++          break;
++        case 'FRONT':
++          dir.set(0, 0, 1);
++          up.set(0, 1, 0);
++          break;
++        case 'BACK':
++          dir.set(0, 0, -1);
++          up.set(0, 1, 0);
++          break;
++        case 'LEFT':
++          dir.set(-1, 0, 0);
++          up.set(0, 1, 0);
++          break;
++        case 'RIGHT':
++          dir.set(1, 0, 0);
++          up.set(0, 1, 0);
++          break;
++        case 'ISO':
++        default:
++          dir.set(1, 1, 1).normalize();
++          up.set(0, 1, 0);
++          break;
++      }
++
++      controls.target.copy(center);
++      activeCamera.position.copy(center).add(dir.normalize().multiplyScalar(distance));
++      activeCamera.up.copy(up);
++      activeCamera.lookAt(center);
++      syncInactiveCamera();
++      controls.update();
++    },
++
++    getPresetView() {
++      return currentPreset;
++    },
++
++    setDampingFactor(value) {
++      controls.dampingFactor = Math.max(0, Math.min(1, Number(value) || 0));
++    },
++
++    getDampingFactor() {
++      return controls.dampingFactor;
++    },
++
++    setSmoothTime(value) {
++      const next = Math.max(0, Math.min(2, Number(value) || 0));
++      smoothTime = next;
++      if (smoothTime === 0) {
++        controls.enableDamping = false;
++        controls.dampingFactor = 1;
++      } else {
++        controls.enableDamping = true;
++        controls.dampingFactor = smoothTimeToDamping(smoothTime);
++      }
++    },
++
++    getSmoothTime() {
++      return smoothTime;
++    },
++
++    setProjection(mode) {
++      setProjection(mode);
++    },
++
++    toggleProjection() {
++      setProjection(projectionMode === 'PERSPECTIVE' ? 'ORTHOGRAPHIC' : 'PERSPECTIVE');
++    },
++
++    getProjectionMode() {
++      return projectionMode;
++    },
++
++    isOrthographic() {
++      return projectionMode === 'ORTHOGRAPHIC';
++    },
++
++    getActiveCamera() {
++      return activeCamera;
++    },
++
++    getPerspectiveFov() {
++      return perspectiveCamera.fov;
++    },
++
++    setPerspectiveFov(value) {
++      const next = Math.max(20, Math.min(120, Number(value) || perspectiveCamera.fov));
++      perspectiveCamera.fov = next;
++      perspectiveCamera.updateProjectionMatrix();
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++    },
++
++    onResize(width, height) {
++      const safeW = Math.max(1, width || domElement.clientWidth || 1);
++      const safeH = Math.max(1, height || domElement.clientHeight || 1);
++      perspectiveCamera.aspect = safeW / safeH;
++      perspectiveCamera.updateProjectionMatrix();
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++    },
++
++    dispose() {
++      controls.dispose();
++    }
++  };
++
++  function fitBox(box) {
++    currentBounds = box.clone();
++    currentCenter = box.getCenter(new THREE.Vector3());
++
++    const size = box.getSize(new THREE.Vector3());
++    const maxDim = Math.max(size.x, size.y, size.z, 1);
++    const fovRad = THREE.MathUtils.degToRad(perspectiveCamera.fov);
++    currentDistance = ((maxDim * 0.5) / Math.tan(fovRad * 0.5)) * 1.35;
++    currentDistance = Math.max(1, currentDistance);
++
++    const currentDir = activeCamera.position.clone().sub(controls.target);
++    if (currentDir.lengthSq() < 1e-6) currentDir.set(1, 1, 1);
++    currentDir.normalize();
++
++    controls.target.copy(currentCenter);
++    activeCamera.position.copy(currentCenter).add(currentDir.multiplyScalar(currentDistance));
++
++    const near = Math.max(0.1, currentDistance / 1000);
++    const far = Math.max(1000, currentDistance * 20 + maxDim * 10);
++    perspectiveCamera.near = near;
++    perspectiveCamera.far = far;
++    perspectiveCamera.updateProjectionMatrix();
++    orthoCamera.near = near;
++    orthoCamera.far = far;
++    updateOrthoFrustum(currentDistance);
++
++    homePosition.copy(activeCamera.position);
++    homeTarget.copy(controls.target);
++    homeMode = projectionMode;
++    syncInactiveCamera();
++    controls.update();
++  }
++
++  function setProjection(mode) {
++    const next = String(mode || 'PERSPECTIVE').toUpperCase();
++    if (next === projectionMode) return;
++
++    if (next === 'ORTHOGRAPHIC') {
++      orthoCamera.position.copy(activeCamera.position);
++      orthoCamera.quaternion.copy(activeCamera.quaternion);
++      orthoCamera.up.copy(activeCamera.up);
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++      activeCamera = orthoCamera;
++      controls.object = orthoCamera;
++      projectionMode = 'ORTHOGRAPHIC';
++    } else {
++      perspectiveCamera.position.copy(activeCamera.position);
++      perspectiveCamera.quaternion.copy(activeCamera.quaternion);
++      perspectiveCamera.up.copy(activeCamera.up);
++      perspectiveCamera.updateProjectionMatrix();
++      activeCamera = perspectiveCamera;
++      controls.object = perspectiveCamera;
++      projectionMode = 'PERSPECTIVE';
++    }
++
++    controls.update();
++  }
++
++  function updateOrthoFrustum(distance) {
++    const width = Math.max(1, domElement.clientWidth || 1);
++    const height = Math.max(1, domElement.clientHeight || 1);
++    const aspect = width / height;
++    const fovRad = THREE.MathUtils.degToRad(perspectiveCamera.fov);
++    const halfHeight = Math.max(1, distance * Math.tan(fovRad * 0.5));
++
++    orthoCamera.left = -halfHeight * aspect;
++    orthoCamera.right = halfHeight * aspect;
++    orthoCamera.top = halfHeight;
++    orthoCamera.bottom = -halfHeight;
++    orthoCamera.updateProjectionMatrix();
++  }
++
++  function syncInactiveCamera() {
++    if (activeCamera !== perspectiveCamera) {
++      perspectiveCamera.position.copy(activeCamera.position);
++      perspectiveCamera.quaternion.copy(activeCamera.quaternion);
++      perspectiveCamera.up.copy(activeCamera.up);
++      perspectiveCamera.updateProjectionMatrix();
++    }
++    if (activeCamera !== orthoCamera) {
++      orthoCamera.position.copy(activeCamera.position);
++      orthoCamera.quaternion.copy(activeCamera.quaternion);
++      orthoCamera.up.copy(activeCamera.up);
++      updateOrthoFrustum(activeCamera.position.distanceTo(controls.target) || currentDistance);
++    }
++  }
++
++  function smoothTimeToDamping(seconds) {
++    return Math.max(0.01, Math.min(0.25, 1 / (1 + seconds * 25)));
++  }
++}
+diff --git a/viewer/js/pcf2glb/advanced/createSelection.js b/viewer/js/pcf2glb/advanced/createSelection.js
+index 1111111..2222222 100644
+--- a/viewer/js/pcf2glb/advanced/createSelection.js
++++ b/viewer/js/pcf2glb/advanced/createSelection.js
+@@ -1,29 +1,47 @@
+ import * as THREE from 'three';
+ 
+-export function createSelection(camera, scene, domElement) {
++export function createSelection(cameraOrGetter, scene, domElement) {
++  const getCamera = typeof cameraOrGetter === 'function'
++    ? cameraOrGetter
++    : () => cameraOrGetter;
++
+   const raycaster = new THREE.Raycaster();
+   const mouse = new THREE.Vector2();
+   let selectHandler = null;
+ 
+   function onPointerDown(event) {
++    const camera = getCamera();
++    if (!camera) return;
++
+     const rect = domElement.getBoundingClientRect();
+     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+ 
+     raycaster.setFromCamera(mouse, camera);
+     const hits = raycaster.intersectObjects(scene.children, true);
+-    const meshHit = hits.find(h => h.object?.isMesh);
+-    selectHandler?.(meshHit?.object || null);
++    const meshHit = hits.find(h => h.object?.isMesh || h.object?.type === 'Mesh');
++    selectHandler?.(meshHit ? resolveInspectableObject(meshHit.object) : null);
+   }
+ 
+   domElement.addEventListener('pointerdown', onPointerDown);
+ 
+   return {
+     onSelect(cb) {
+       selectHandler = cb;
+     },
+     dispose() {
+       domElement.removeEventListener('pointerdown', onPointerDown);
+     }
+   };
+ }
++
++export function resolveInspectableObject(object) {
++  let cursor = object;
++  while (cursor && cursor.parent) {
++    if (cursor.userData?.pcfId || cursor.userData?.REF_NO || cursor.userData?.pcfType) {
++      return cursor;
++    }
++    cursor = cursor.parent;
++  }
++  return object;
++}
+diff --git a/viewer/js/pcf2glb/advanced/createViewerApp.js b/viewer/js/pcf2glb/advanced/createViewerApp.js
+index 1111111..3333333 100644
+--- a/viewer/js/pcf2glb/advanced/createViewerApp.js
++++ b/viewer/js/pcf2glb/advanced/createViewerApp.js
+@@ -1,80 +1,223 @@
+ import * as THREE from 'three';
+ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+ import { createRenderer } from './createRenderer.js';
+ import { createCameraController } from './createCameraController.js';
+ import { createToolbar } from './createToolbar.js';
+ import { buildSceneIndex } from './sceneIndex.js';
+-import { createSelection } from './createSelection.js';
++import { createSelection, resolveInspectableObject } from './createSelection.js';
+ import { createPropertyPanel } from './createPropertyPanel.js';
+ import { createHeatmap } from './createHeatmap.js';
+ import { createSectionBox } from './createSectionBox.js';
+ import { createMarqueeZoom } from './createMarqueeZoom.js';
+ import { disposeScene } from './disposeRuntime.js';
+ import { createAxisHelper } from './createAxisHelper.js';
+ import { createDebugPanel } from './createDebugPanel.js';
+ 
+-export function createViewerApp(previewContainer, toolbarContainer, propPanel, propContent, debugLogsContainer) {
++export function createViewerApp(
++  previewContainer,
++  toolbarContainer,
++  propPanel,
++  propContent,
++  debugLogsContainer,
++  options = {}
++) {
+   const scene = new THREE.Scene();
+   scene.background = new THREE.Color(0x222222);
+ 
+   const camera = new THREE.PerspectiveCamera(
+     60,
+     Math.max(1, previewContainer.clientWidth / Math.max(1, previewContainer.clientHeight)),
+     0.1,
+     10000000
+   );
+   camera.position.set(100, 100, 100);
+ 
+   let renderer = null;
+   let disposeRenderer = null;
+   let controller = null;
+   let toolbar = null;
+   let propertyPanel = null;
+   let heatmap = null;
+   let sectionBox = null;
+   let debugPanel = null;
+   let axesHelper = null;
+-  let currentRoot = null;
+   let animationId = null;
++  let currentRoot = null;
+   let sceneIndex = null;
++  let selectionApi = null;
++  let resizeObserver = null;
++  let lastSelectionItem = null;
+ 
+   const domElement = previewContainer;
+ 
+   init();
+ 
+   function init() {
+     const r = createRenderer(previewContainer);
+     renderer = r.renderer;
+     disposeRenderer = r.dispose;
+ 
+     controller = createCameraController(camera, domElement);
+ 
+     const ambient = new THREE.AmbientLight(0xffffff, 0.75);
+     scene.add(ambient);
+ 
+     const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+     dir.position.set(200, 300, 150);
+     scene.add(dir);
+ 
+     const pointLight = new THREE.PointLight(0xffffff, 0.5);
+     camera.add(pointLight);
+     scene.add(camera);
+ 
+-    toolbar = createToolbar(toolbarContainer, controller);
+-    toolbar.setFitHandler(() => {
+-      if (currentRoot) controller.fitScene(currentRoot);
+-    });
++    if (!options.disableInternalToolbar && toolbarContainer) {
++      toolbar = createToolbar(toolbarContainer, controller);
++      toolbar.setFitHandler(() => {
++        if (currentRoot) controller.fitScene(currentRoot);
++      });
++    }
+ 
+     propertyPanel = createPropertyPanel(propPanel, propContent);
+     heatmap = createHeatmap(scene);
+     sectionBox = createSectionBox(scene, renderer);
+     debugPanel = createDebugPanel(debugLogsContainer);
+     axesHelper = createAxisHelper(camera, () => {
+       controller.setPresetView('ISO');
+     });
+ 
+-    const selection = createSelection(camera, scene, domElement);
+-    selection.onSelect((clickedObj) => {
++    if (toolbar) {
++      toolbar.setSectionHandler((enabled) => {
++        if (enabled) {
++          sectionBox.enable();
++          if (currentRoot) sectionBox.fitToScene(currentRoot);
++        } else {
++          sectionBox.disable(currentRoot);
++        }
++      });
++    }
++
++    selectionApi = createSelection(() => controller.getActiveCamera(), scene, domElement);
++    selectionApi.onSelect((clickedObj) => {
+       if (!clickedObj || !sceneIndex) {
+         controller.resetTarget();
+         propertyPanel.hide();
++        lastSelectionItem = null;
++        options.onSelectionChange?.(null, null);
+         return;
+       }
+ 
+       const id = clickedObj.userData.pcfId || clickedObj.userData.REF_NO || clickedObj.name || clickedObj.uuid;
+       const item = sceneIndex.byId.get(id);
+ 
+       if (item) {
++        lastSelectionItem = item;
+         controller.fitObject(item.object3D);
+         propertyPanel.show(item);
+         if (sectionBox && sectionBox.isEnabled()) {
+           sectionBox.fitToSelection(item.object3D, currentRoot);
+         }
++        options.onSelectionChange?.(item, clickedObj);
+       }
+     });
+ 
+-    createMarqueeZoom(camera, scene, domElement, controller);
++    createMarqueeZoom(controller.getActiveCamera ? () => controller.getActiveCamera() : camera, scene, domElement, controller);
+ 
+     domElement.addEventListener('pointerup', (event) => {
+       if (axesHelper && axesHelper.handleClick(event)) {
+         // handled by helper
+       }
++      options.onPointerUp?.(event);
+     });
+ 
+     animate();
++
++    resizeObserver = new ResizeObserver((entries) => {
++      const rect = entries?.[0]?.contentRect;
++      const width = rect?.width || previewContainer.clientWidth;
++      const height = rect?.height || previewContainer.clientHeight;
++      if (renderer) renderer.setSize(width, height, false);
++      controller.onResize?.(width, height);
++    });
++    resizeObserver.observe(previewContainer);
+   }
+ 
+   function animate() {
+     animationId = requestAnimationFrame(animate);
+     controller.controls.update();
+-    renderer.render(scene, camera);
++    renderer.render(scene, controller.getActiveCamera ? controller.getActiveCamera() : camera);
+     if (axesHelper) {
+       renderer.autoClear = false;
+       axesHelper.render(renderer);
++      renderer.autoClear = true;
+     }
++    options.onFrame?.({
++      camera,
++      scene,
++      currentRoot,
++      selection: lastSelectionItem,
++      renderer
++    });
+   }
+ 
+   return {
+     async loadGLB(url) {
+       if (currentRoot) {
+         scene.remove(currentRoot);
+         disposeScene(currentRoot);
+         currentRoot = null;
+         sceneIndex = null;
++        lastSelectionItem = null;
+       }
+ 
+       const loader = new GLTFLoader();
+       return new Promise((resolve, reject) => {
+         loader.load(
+           url,
+           (gltf) => {
+             currentRoot = gltf.scene;
+             scene.add(currentRoot);
+ 
+             sceneIndex = buildSceneIndex(currentRoot);
+             controller.fitScene(currentRoot);
+             debugPanel.log('system', 'info', `Loaded scene with ${sceneIndex.items.length} indexed objects`);
+ 
+             const propSet = new Set();
+             currentRoot.traverse(c => {
+               if (c.isMesh && c.userData) {
+                 Object.keys(c.userData).forEach(k => propSet.add(k));
+               }
+             });
+-            toolbar.setProperties(Array.from(propSet).sort());
++            if (toolbar) {
++              toolbar.setProperties(Array.from(propSet).sort());
++              toolbar.setHeatmapHandler((prop) => {
++                if (prop === 'default') {
++                  heatmap.clearMetric();
++                  toolbar.updateLegend(null);
++                  return;
++                }
++                const values = [];
++                currentRoot.traverse(obj => {
++                  if (obj.isMesh && obj.userData && obj.userData[prop] != null) {
++                    const n = Number(obj.userData[prop]);
++                    if (Number.isFinite(n)) values.push(n);
++                  }
++                });
++                if (!values.length) return;
++                const min = Math.min(...values);
++                const max = Math.max(...values);
++                heatmap.applyMetric(prop, { min, max });
++                toolbar.updateLegend(`<div>${prop}: ${min.toFixed(2)} → ${max.toFixed(2)}</div>`);
++              });
++            }
+ 
++            options.onSceneLoaded?.({ scene: currentRoot, sceneIndex });
+             resolve();
+           },
+           undefined,
+           reject
+         );
+       });
+     },
++
++    fitAll() {
++      if (currentRoot) controller.fitScene(currentRoot);
++    },
++
++    home() {
++      controller.resetHome();
++    },
++
++    setProjection(mode) {
++      controller.setProjection?.(mode);
++    },
++
++    toggleProjection() {
++      controller.toggleProjection?.();
++    },
++
++    getProjectionMode() {
++      return controller.getProjectionMode?.();
++    },
++
++    setPresetView(name) {
++      controller.setPresetView(name);
++    },
++
++    getController() {
++      return controller;
++    },
++
++    getScene() {
++      return scene;
++    },
++
++    getSceneIndex() {
++      return sceneIndex;
++    },
++
++    getCurrentRoot() {
++      return currentRoot;
++    },
++
++    getCurrentSelection() {
++      return lastSelectionItem;
++    },
++
++    pickAtClient(clientX, clientY) {
++      if (!renderer || !currentRoot) return null;
++
++      const rect = domElement.getBoundingClientRect();
++      const mouse = new THREE.Vector2(
++        ((clientX - rect.left) / rect.width) * 2 - 1,
++        -((clientY - rect.top) / rect.height) * 2 + 1
++      );
++      const raycaster = new THREE.Raycaster();
++      raycaster.setFromCamera(mouse, controller.getActiveCamera ? controller.getActiveCamera() : camera);
++      const intersects = raycaster.intersectObjects(scene.children, true);
++
++      for (const hit of intersects) {
++        if (!hit.object || (!hit.object.isMesh && hit.object.type !== 'Mesh')) continue;
++        const resolved = resolveInspectableObject(hit.object);
++        const id = resolved?.userData?.pcfId || resolved?.userData?.REF_NO || resolved?.name || resolved?.uuid;
++        const item = sceneIndex?.byId?.get(id) ?? null;
++        return { hit, object: resolved, item };
++      }
++      return null;
++    },
++
+     dispose() {
+       if (animationId) cancelAnimationFrame(animationId);
++      if (resizeObserver) resizeObserver.disconnect();
++      if (selectionApi) selectionApi.dispose();
+       if (disposeRenderer) disposeRenderer();
+       if (controller) controller.dispose();
++      if (currentRoot) {
++        scene.remove(currentRoot);
++        disposeScene(currentRoot);
++      }
+     }
+   };
+ }
+```
+
+---
+
+## What this patch fixes
+
+This is the missing runtime glue for the UI layout patch. It gives your shell a real backend for:
+
+* **loading a GLB**
+* **fitting all geometry**
+* **resetting home**
+* **switching projection**
+* **reading controller state**
+* **hover ray-pick**
+* **selection callbacks**
+* **resize-safe rendering**
+* **clean disposal**
+
+Without this, the shell code is only a layout wrapper. With this, the shell becomes **usable**.
+
+---
+
+## Why this is the right companion
+
+Your shell patch assumed these runtime methods existed. This companion patch exposes exactly those methods from `createViewerApp`, and makes `createSelection` and `createCameraController` projection-aware, which is necessary for:
+
+* HUD updates
+* hover tooltips
+* aligned views
+* ortho/perspective switching
+* right-dock property display
+* camera pass tests
+
+That is fully consistent with the WI direction that the Pro GLB Viewer should reuse the advanced viewer modules but add structured shell, camera, property, and debug behavior on top. 
+
+---
+
+## Expected smoke flow after both patches
+
+1. Open **Pro GLB Viewer**
+2. Import a `.glb`
+3. Model loads into center canvas
+4. `Fit` frames the model
+5. `Home` restores camera
+6. `Ortho / Persp` toggles projection
+7. Hover over geometry shows tooltip
+8. Click geometry updates right property dock
+9. Bottom debug dock receives logs
+10. Switching tabs cleans up without leak
+
+---
+
+## One honest note
+
+I did **not** patch `createToolbar.js`, `createHeatmap.js`, or `createMarqueeZoom.js` here because your shell is running with `disableInternalToolbar: true`, so those are not blocking for the professional layout to work. If your local `createMarqueeZoom` strictly requires a camera object instead of a getter, I can give you the tiny compatibility patch for that next.
+
+The next most useful patch is the **editing foundation patch**:
+
+* move/rotate gizmo mount
+* tool state machine
+* snap guide overlay
+* hover details enriched from property schema
+* keyboard shortcuts end-to-end
+
+
