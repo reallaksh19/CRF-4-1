@@ -1,0 +1,24 @@
+[
+  {
+    "_comment": "Source Access table/query: FlangeUG44bDB",
+    "id": "FA-UG44-0001",
+    "method": "UG44",
+    "standard": "UG44",
+    "material_group": "CS_A105",
+    "nps_in": 4,
+    "rating": 300,
+    "temperature_c": 20,
+    "rated_pressure_mpa": 5.1,
+    "allowable_axial_kn": 38.0,
+    "allowable_moment_knm": 5.8,
+    "interaction_rule": "LINEAR_SUM",
+    "FM": null,
+    "G_m": null,
+    "source_access_table": "FlangeUG44bDB",
+    "source_access_fields_seen": [
+      "FM",
+      "G(m)"
+    ],
+    "notes": "Populate actual UG44 master rows from Access export. FM and G_m preserve seen Access fields."
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "_comment": "Source Access table: tblFlangeDetails",
+    "id": "FD-0001",
+    "standard": "ASME B16.5",
+    "nps_in": 4,
+    "rating": 300,
+    "flange_type": "WNRF",
+    "facing": "RF",
+    "od_mm": 228.6,
+    "thickness_mm": 30.2,
+    "bcd_mm": 190.5,
+    "bolt_count": 8,
+    "bolt_dia_mm": 22.2,
+    "Ab_in2": null,
+    "c_in": null,
+    "source_access_table": "tblFlangeDetails",
+    "source_access_fields_seen": [
+      "Rating",
+      "NB (INCH)",
+      "Abinch2",
+      "cinch"
+    ],
+    "notes": "Populate from Access master table export. Ab_in2 and c_in map to Abinch2 and cinch."
+  }
+]

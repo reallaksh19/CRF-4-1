@@ -1,0 +1,16 @@
+[
+  {
+    "_comment": "Source Access table: tblFlangeMaterial",
+    "id": "FM-0001",
+    "specification": "A105",
+    "material_group": "CS_A105",
+    "material_name": "Carbon Steel ASTM A105",
+    "standard": null,
+    "remarks": "",
+    "source_access_table": "tblFlangeMaterial",
+    "source_access_fields_seen": [
+      "SPECIFICATION"
+    ],
+    "notes": "Add all additional fields discovered during actual Access export."
+  }
+]

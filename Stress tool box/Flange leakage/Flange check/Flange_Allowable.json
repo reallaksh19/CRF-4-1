@@ -1,0 +1,19 @@
+[
+  {
+    "_comment": "Source Access table/query: Flange_Allowable",
+    "id": "FA-NC-0001",
+    "method": "NC",
+    "standard": "NC-3658.3",
+    "material_group": "CS_A105",
+    "nps_in": 4,
+    "rating": 300,
+    "temperature_c": 20,
+    "allowable_pressure_mpa": 5.1,
+    "allowable_axial_kn": 42.0,
+    "allowable_moment_knm": 6.5,
+    "interaction_rule": "LINEAR_SUM",
+    "source_access_table": "Flange_Allowable",
+    "source_access_fields_seen": [],
+    "notes": "Populate actual field names after exporting Flange_Allowable from Access."
+  }
+]
