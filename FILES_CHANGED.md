@@ -1,0 +1,11 @@
+# Files Changed
+- `viewer/index.html` (added GLTFExporter import)
+- `viewer/core/app.js` (added GLB Export tab)
+- `viewer/tabs/misc-calc-tab.js` (overhauled layout, SVG generation)
+- `viewer/tabs/misc-calc-layout.js` (added)
+- `viewer/calc/core/calc-engine.js` (unit normalization)
+- `viewer/calc/units/*` (added unit definitions and converter)
+- `viewer/calc/svg/*` (added dynamic SVG shells for 5 calculators)
+- `viewer/calc/formulas/*` (upgraded mock formulas to proper integrity)
+- `viewer/calc/benchmark/*` (added harness)
+- `viewer/js/pcf2glb/*` (added full GLB export pipeline logic)
