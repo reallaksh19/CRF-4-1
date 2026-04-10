@@ -1,0 +1,98 @@
+Advanced Modules
+Section box and clipping planes (phase 2)
+Clipping planes allow users to slice through the model and view internal details. In Three.js, each material can have an array of user‑defined clipping planes specified as THREE.Plane objects. However, clipping planes only clip objects when WebGLRenderer.localClippingEnabled is set to true. The Verge3D/three.js manual notes that clipping planes are evaluated in world space and points with a negative signed distance to the plane are not rendered[1]. Therefore, before creating a section box:
+1.	Set renderer.localClippingEnabled = true when the section tools are enabled.
+2.	Construct six THREE.Plane objects representing the faces of an axis‑aligned box. Each plane has a normal and a constant (distance from origin) computed from the bounding box of the model.
+3.	Assign these planes to the material’s clippingPlanes property. For global clipping (affecting all materials), assign the planes to renderer.clippingPlanes. For local clipping (per object), assign to each material. Use clipIntersection = true so that only the intersection of planes is visible.
+4.	Provide UI handles to drag planes. When dragging, update the plane’s constant value.
+5.	Clean up by setting materials’ clippingPlanes back to null and disabling localClippingEnabled when the section box is turned off.
+Example snippet
+// enable global clipping
+renderer.localClippingEnabled = true;
+const planes = [
+  new THREE.Plane(new THREE.Vector3(-1, 0, 0), bx.max.x),
+  new THREE.Plane(new THREE.Vector3( 1, 0, 0), -bx.min.x),
+  new THREE.Plane(new THREE.Vector3(0, -1, 0), bx.max.y),
+  new THREE.Plane(new THREE.Vector3(0,  1, 0), -bx.min.y),
+  new THREE.Plane(new THREE.Vector3(0, 0, -1), bx.max.z),
+  new THREE.Plane(new THREE.Vector3(0, 0,  1), -bx.min.z),
+];
+renderer.clippingPlanes = planes;
+renderer.clipIntersection = true; // clip space between planes
+
+// update on handle drag: adjust plane.constant
+function updatePlane(index, offset) {
+  planes[index].constant = offset;
+}
+Measurement tools (phase 3)
+Measurements require interactive point picking and visual feedback. Three.js provides a Raycaster class for mouse picking, and the CSS2DRenderer for HTML labels in 3D space. A widely used tutorial demonstrates this technique: it uses the Raycaster with pointer events to start and draw a line between points, uses CSS2DRenderer and CSS2DObject to create measurement labels, and uses Vector3.lerpVectors to position the label midway between two points[2]. The algorithm is:
+1.	On mouse down, cast a ray from the camera through the mouse position into the scene and record the first intersection point. When the user selects a second point, record it and create a THREE.Line connecting the two points.
+2.	Compute the distance using point1.distanceTo(point2). Format the value using the user’s units (mm/meters) and decimal settings.
+3.	Create a CSS2DObject containing a <div> with the distance text and add it to the scene. Use Vector3.lerpVectors(point1, point2, 0.5) to position the label at the midpoint.
+4.	Provide a UI to clear or delete measurement lines. Store measurements in an array so they can be redrawn if the view resets.
+Example snippet
+// prepare overlay renderer
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(container.clientWidth, container.clientHeight);
+container.appendChild(labelRenderer.domElement);
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let firstPoint = null;
+const measurements = [];
+
+function onPointerDown(event) {
+  // normalise mouse coordinates
+  mouse.x = (event.clientX / container.clientWidth) * 2 - 1;
+  mouse.y = -(event.clientY / container.clientHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObjects(pickableObjects, false);
+  if (intersects.length === 0) return;
+  const point = intersects[0].point.clone();
+  if (!firstPoint) {
+    firstPoint = point;
+    logger.info(CH.MEASURE, 'First measurement point selected');
+  } else {
+    const secondPoint = point;
+    const lineGeom = new THREE.BufferGeometry().setFromPoints([firstPoint, secondPoint]);
+    const line = new THREE.Line(lineGeom, new THREE.LineBasicMaterial({ color: 0xff8800 }));
+    scene.add(line);
+    const distance = firstPoint.distanceTo(secondPoint);
+    const labelDiv = document.createElement('div');
+    labelDiv.className = 'measurementLabel';
+    labelDiv.textContent = formatDistance(distance);
+    const label = new CSS2DObject(labelDiv);
+    label.position.copy(firstPoint).lerp(secondPoint, 0.5);
+    scene.add(label);
+    measurements.push({ line, label, distance });
+    logger.info(CH.MEASURE, 'Measurement created', { distance });
+    firstPoint = null;
+  }
+}
+
+function formatDistance(d) {
+  const units = settings.units || 'mm';
+  const decimals = settings.propertyPanel.floatDecimalPlaces;
+  const value = (units === 'm') ? (d / 1000) : d;
+  return value.toFixed(decimals) + ' ' + units;
+}
+Heatmap overlays (phase 4)
+Heatmap overlays map scalar values (e.g., pressure, temperature, stress) onto mesh surfaces. According to a Three.js forum discussion, there are three primary ways to apply a gradient to a mesh[3]:
+1.	Canvas2D texture – draw the gradient on a Canvas element and use the canvas as a texture on the mesh. Updating the gradient or changing the thresholds is done by redrawing the canvas.
+2.	Static gradient image – prepare a 1×n gradient image and slide it along the mesh using the texture’s offset property. This is simple but less flexible.
+3.	Vertex colours – set material.vertexColors = true and assign a colour per vertex (e.g., from blue to red). The GPU interpolates colours across the faces, producing a smooth gradient. This approach avoids texture lookups and is efficient.
+Recommended approach: For a viewer that loads arbitrary PCF models, using vertex colours or a 1D gradient texture is preferable. The metric adapter should compute a scalar value for each vertex (or each component) and map it to a colour via a palette. The palette can be implemented as a simple function mapping value → colour, or via a small gradient texture sampled in a custom shader. Provide a UI legend explaining the colour scale.
+Debugging and Development Considerations
+Use the structured debug console: Each module should emit events to the debug console using the provided channel constants. For example, after a successful PCF parse, call logger.info(CH.IMPORT, 'PCF parsed', { componentCount }). When disposing of a scene, emit a SCENE debug event with level DEBUG.
+Enable performance overlay: The settings panel includes an option to show frames per second, draw calls and memory usage. Use Stats.js or the existing metricsAdapter to display this overlay and emit periodic PERF logs.
+Snap to vertices when measuring: To improve measurement accuracy, provide an option to snap measurement points to nearest vertices. This can be done by building an octree or kd‑tree of vertex positions and returning the closest vertex when the raycaster picks a face. Log snapping actions via the MEASURE channel.
+Section box handles: Provide clear visual handles for the section box. When the user drags a handle, update the corresponding plane’s constant and emit a SECTION debug event. When handles are hidden (e.g., on narrow screens), consider using keyboard shortcuts to move planes.
+Property panel performance: Since some components have hundreds of raw attributes, cap the number of rows shown (e.g., maxRawRows: 30 by default) and provide a toggle to show all. Format floats using Number.toFixed(settings.propertyPanel.floatDecimalPlaces).
+Memory leak prevention: The viewer must revoke object URLs created by URL.createObjectURL when switching models or leaving the Pro GLB tab. Implement destroy() in each module to dispose of Three.js objects, remove event listeners and cancel requestAnimationFrame loops. The tab router’s destroy hook ensures this runs when leaving the tab.
+Enhancements and Recommendations
+1.	Progressive feature rollout: Follow the phase plan to avoid overloading the codebase. Phase 0 focuses on scaffolding, imports and settings; subsequent phases add property panels, section boxes, measurement, heatmaps and advanced debug features.
+2.	Responsive design: Ensure the left panel (280 px ±4 px) and the floating property panel (320 px ±4 px) work at 1024 px width. On very narrow widths, allow collapsing panels.
+3.	Units and coordinate system: Provide settings to choose units (mm, m, inch). When converting from PCF or state, store positions in consistent units (e.g., millimetres) and apply conversion factors when computing length and displaying measurement results.
+4.	Extensibility: The per‑component schema file should be easy to extend for new component types. Use descriptive keys (pcfType, ATTR_CODE) and allow fallback keys arrays.
+5.	Future backend integration: Should a backend be added later (e.g., for large file uploads or caching), design the import controller to delegate remote loading to a service. Keep the adapter pattern so you can plug in a Proglb_RemoteImportAdapter.
+6.	Accessibility: Provide keyboard alternatives for camera controls and measurements, and ensure labels use accessible fonts and sufficient contrast.
