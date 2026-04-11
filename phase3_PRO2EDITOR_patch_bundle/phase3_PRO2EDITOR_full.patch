@@ -1,0 +1,1144 @@
+diff -ruN a/test-phase-3.js b/test-phase-3.js
+--- a/test-phase-3.js	1970-01-01 00:00:00.000000000 +0000
++++ b/test-phase-3.js	2026-04-11 07:01:32.890714624 +0000
+@@ -0,0 +1,52 @@
++const { loadDataTable, getRow, setRowField } = require('./viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_dataStore.js');
++const { createCommandStack } = require('./viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_commandStack.js');
++const { computeBoundingMeasurement } = require('./viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_measureUtils.js');
++
++let THREE;
++try { THREE = require('three'); }
++catch (err) { THREE = require('./three-stub.js'); }
++
++function approxEqual(a, b, epsilon = 1e-6) { return Math.abs(a - b) < epsilon; }
++
++function testDataStore() {
++  loadDataTable([{ id: 'P100', diameter: 6, type: 'PIPE' }, { id: 'F200', rating: '150', type: 'FLANGE' }]);
++  if (!getRow('P100') || getRow('P100').diameter !== 6) throw new Error('PRO2EDITOR data store failed to load rows');
++  setRowField('P100', 'diameter', 8);
++  if (getRow('P100').diameter !== 8) throw new Error('PRO2EDITOR data store failed to update existing row');
++  setRowField('V300', 'type', 'VALVE');
++  if (!getRow('V300') || getRow('V300').type !== 'VALVE') throw new Error('PRO2EDITOR data store failed to create new row');
++}
++
++function testCommandStack() {
++  const stack = createCommandStack();
++  let value = 0;
++  stack.exec({ do() { value = 5; }, undo() { value = 0; } });
++  if (value !== 5) throw new Error('PRO2EDITOR command stack exec failed');
++  stack.undo();
++  if (value !== 0) throw new Error('PRO2EDITOR command stack undo failed');
++  stack.redo();
++  if (value !== 5) throw new Error('PRO2EDITOR command stack redo failed');
++}
++
++function testMeasure() {
++  const geom = new THREE.BoxGeometry(3, 5, 7);
++  const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial());
++  const stats = computeBoundingMeasurement(mesh);
++  if (!approxEqual(stats.width, 3) || !approxEqual(stats.height, 5) || !approxEqual(stats.depth, 7)) {
++    throw new Error(`PRO2EDITOR measure dimensions mismatch: ${stats.width}, ${stats.height}, ${stats.depth}`);
++  }
++  const expectedDiag = Math.sqrt(3*3 + 5*5 + 7*7);
++  if (!approxEqual(stats.diagonal, expectedDiag)) {
++    throw new Error(`PRO2EDITOR measure diagonal mismatch: ${stats.diagonal} vs ${expectedDiag}`);
++  }
++}
++
++try {
++  testDataStore();
++  testCommandStack();
++  testMeasure();
++  console.log('Phase 3 smoke tests passed');
++} catch (err) {
++  console.error(err);
++  process.exit(1);
++}
+diff -ruN a/three-stub.js b/three-stub.js
+--- a/three-stub.js	1970-01-01 00:00:00.000000000 +0000
++++ b/three-stub.js	2026-04-11 07:01:32.890396954 +0000
+@@ -0,0 +1,39 @@
++class Vector3 {
++  constructor(x = 0, y = 0, z = 0) { this.x = x; this.y = y; this.z = z; }
++  set(x, y, z) { this.x = x; this.y = y; this.z = z; return this; }
++  clone() { return new Vector3(this.x, this.y, this.z); }
++  sub(v) { this.x -= v.x; this.y -= v.y; this.z -= v.z; return this; }
++  add(v) { this.x += v.x; this.y += v.y; this.z += v.z; return this; }
++  multiplyScalar(s) { this.x *= s; this.y *= s; this.z *= s; return this; }
++  length() { return Math.sqrt(this.x*this.x + this.y*this.y + this.z*this.z); }
++}
++class Box3 {
++  constructor(min = new Vector3(+Infinity, +Infinity, +Infinity), max = new Vector3(-Infinity, -Infinity, -Infinity)) { this.min = min; this.max = max; }
++  setFromObject(object) {
++    if (object && object.geometry && object.geometry.boundingBox) {
++      this.min = object.geometry.boundingBox.min.clone();
++      this.max = object.geometry.boundingBox.max.clone();
++      return this;
++    }
++    if (object && object.geometry && object.geometry.parameters) {
++      const p = object.geometry.parameters;
++      const hw = (p.width || 0) / 2;
++      const hh = (p.height || 0) / 2;
++      const hd = (p.depth || 0) / 2;
++      this.min = new Vector3(-hw, -hh, -hd);
++      this.max = new Vector3(hw, hh, hd);
++    }
++    return this;
++  }
++  getSize(target) { target.x = this.max.x - this.min.x; target.y = this.max.y - this.min.y; target.z = this.max.z - this.min.z; return target; }
++}
++class BoxGeometry {
++  constructor(width = 1, height = 1, depth = 1) {
++    this.parameters = { width, height, depth };
++    const hw = width/2, hh = height/2, hd = depth/2;
++    this.boundingBox = new Box3(new Vector3(-hw,-hh,-hd), new Vector3(hw,hh,hd));
++  }
++}
++class Mesh { constructor(geometry, material) { this.geometry = geometry; this.material = material; } }
++class MeshBasicMaterial { constructor(params = {}) { this.params = params; } }
++module.exports = { Vector3, Box3, BoxGeometry, Mesh, MeshBasicMaterial };
+diff -ruN a/viewer/core/app.js b/viewer/core/app.js
+--- a/viewer/core/app.js	2026-04-11 05:07:00.000000000 +0000
++++ b/viewer/core/app.js	2026-04-11 07:01:32.891387161 +0000
+@@ -20,6 +20,7 @@
+ import { renderPcfGlbExporterPanel } from '../js/pcf2glb/ui/PcfGlbExporterPanel.js';
+ import { renderAdvancedGlbViewerPanel } from '../js/pcf2glb/ui/AdvancedGlbViewerPanel.js';
+ import { renderProGlbEditorPanel } from '../js/pcf2glb/pro-editor/ui/ProGlbEditorPanel.js';
++import { renderPRO2EDITOR_Panel } from '../js/pcf2glb/pro2-editor/ui/PRO2EDITOR_Panel.js';
+ 
+ const IS_LOCAL_DEV = (() => {
+   const host = (window.location && window.location.hostname || '').toLowerCase();
+@@ -41,6 +42,7 @@
+   { id: 'glb-export',label: 'Simple GLB Exporter', render: renderPcfGlbExporterPanel },
+   { id: 'adv-glb',   label: 'Advanced GLB Viewer', render: renderAdvancedGlbViewerPanel },
+   { id: 'pro-glb',   label: 'Pro GLB Editor', render: renderProGlbEditorPanel },
++  { id: 'pro2-glb',  label: 'PRO2 Editor', render: renderPRO2EDITOR_Panel },
+   { id: 'debug',     label: 'Debug',       render: renderDebug    },
+ ];
+ 
+diff -ruN a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_commandStack.js b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_commandStack.js
+--- a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_commandStack.js	1970-01-01 00:00:00.000000000 +0000
++++ b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_commandStack.js	2026-04-11 07:01:32.889322864 +0000
+@@ -0,0 +1,54 @@
++// PRO2 Editor command stack.
++//
++// Commands must implement do() and undo(). Each new exec() clears redo history.
++
++export function createCommandStack(logger) {
++  const undo = [];
++  const redo = [];
++
++  function exec(cmd) {
++    if (!cmd || typeof cmd.do !== 'function' || typeof cmd.undo !== 'function') return;
++    cmd.do();
++    undo.push(cmd);
++    redo.length = 0;
++    if (logger && typeof logger.debug === 'function') {
++      logger.debug('UNDO', 'stack:exec', {
++        undoDepth: undo.length,
++        redoDepth: redo.length,
++        cmd: cmd.name || cmd.constructor?.name || 'Command',
++      });
++    }
++  }
++
++  function undoOne() {
++    const cmd = undo.pop();
++    if (!cmd) return;
++    cmd.undo();
++    redo.push(cmd);
++    if (logger && typeof logger.debug === 'function') {
++      logger.debug('UNDO', 'stack:undo', { undoDepth: undo.length, redoDepth: redo.length });
++    }
++  }
++
++  function redoOne() {
++    const cmd = redo.pop();
++    if (!cmd) return;
++    cmd.do();
++    undo.push(cmd);
++    if (logger && typeof logger.debug === 'function') {
++      logger.debug('UNDO', 'stack:redo', { undoDepth: undo.length, redoDepth: redo.length });
++    }
++  }
++
++  return {
++    exec,
++    undo: undoOne,
++    redo: redoOne,
++    canUndo: () => undo.length > 0,
++    canRedo: () => redo.length > 0,
++  };
++}
++
++if (typeof module !== 'undefined' && module.exports) {
++  module.exports = { createCommandStack };
++}
+diff -ruN a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_createViewerApp.js b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_createViewerApp.js
+--- a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_createViewerApp.js	1970-01-01 00:00:00.000000000 +0000
++++ b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_createViewerApp.js	2026-04-11 07:01:32.889593985 +0000
+@@ -0,0 +1,324 @@
++import * as THREE from 'three';
++import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
++import { TransformControls } from 'three/addons/controls/TransformControls.js';
++import { createRenderer } from '../../advanced/createRenderer.js';
++import { createToolbar } from '../../advanced/createToolbar.js';
++import { createPropertyPanel } from '../../advanced/createPropertyPanel.js';
++import { createHeatmap } from '../../advanced/createHeatmap.js';
++import { createSectionBox } from '../../advanced/createSectionBox.js';
++import { createMarqueeZoom } from '../../advanced/createMarqueeZoom.js';
++import { disposeScene } from '../../advanced/disposeRuntime.js';
++import { createAxisHelper } from '../../advanced/createAxisHelper.js';
++import { createDebugPanel } from '../../advanced/createDebugPanel.js';
++import { createCameraController } from '../../pro-editor/core/createEditorCameraController.js';
++import { buildSceneIndex } from '../../pro-editor/core/sceneIndex.js';
++import { createSelection, resolveInspectableObject } from '../../pro-editor/core/createEditorSelection.js';
++import { createCommandStack } from './PRO2EDITOR_commandStack.js';
++import { computeBoundingMeasurement } from './PRO2EDITOR_measureUtils.js';
++
++export function createPRO2EDITOR_ViewerApp(previewContainer, toolbarContainer, propPanel, propContent, debugLogsContainer, options = {}) {
++  const scene = new THREE.Scene();
++  scene.background = new THREE.Color(0x222222);
++
++  let initialized = false;
++  let renderer, domElement, disposeRenderer, camera, controller, axesHelper, dirLight, pointLight, toolbar;
++  let currentRoot = null;
++  let animationId;
++  let sceneIndex = null;
++  let propertyPanel = null;
++  let heatmap = null;
++  let sectionBox = null;
++  let debugPanel = null;
++  let transformControls = null;
++  let currentSelection = null;
++  let activeToolMode = 'select';
++  let resizeObserver = null;
++  const commandStack = createCommandStack(options.logger);
++
++  const init = () => {
++    if (initialized || !previewContainer.clientWidth) return;
++    initialized = true;
++
++    const renderData = createRenderer(previewContainer);
++    renderer = renderData.renderer;
++    domElement = renderData.domElement;
++    disposeRenderer = renderData.dispose;
++
++    camera = new THREE.PerspectiveCamera(60, previewContainer.clientWidth / previewContainer.clientHeight, 0.1, 10000000);
++    controller = createCameraController(camera, domElement);
++    axesHelper = createAxisHelper(camera, domElement);
++
++    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
++    dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
++    dirLight.position.set(100, 200, 50);
++    scene.add(dirLight);
++
++    pointLight = new THREE.PointLight(0xffffff, 0.5);
++    camera.add(pointLight);
++    scene.add(camera);
++
++    if (toolbarContainer) {
++      toolbar = createToolbar(toolbarContainer, controller);
++      toolbar.setFitHandler(() => {
++        if (currentRoot) controller.fitScene(currentRoot);
++      });
++    }
++
++    propertyPanel = createPropertyPanel(propPanel, propContent);
++    heatmap = createHeatmap(scene);
++    sectionBox = createSectionBox(scene, renderer);
++    debugPanel = createDebugPanel(debugLogsContainer);
++
++    transformControls = new TransformControls(camera, domElement);
++    let dragState = null;
++    transformControls.addEventListener('dragging-changed', (event) => {
++      controller.controls.enabled = !event.value;
++      if (event.value) {
++        const obj = transformControls.object;
++        if (obj) {
++          dragState = {
++            object: obj,
++            start: {
++              position: obj.position.clone(),
++              quaternion: obj.quaternion.clone(),
++              scale: obj.scale.clone(),
++            },
++          };
++        }
++      } else if (dragState && dragState.object) {
++        const obj = dragState.object;
++        const startState = dragState.start;
++        const endState = {
++          position: obj.position.clone(),
++          quaternion: obj.quaternion.clone(),
++          scale: obj.scale.clone(),
++        };
++        const changed = !startState.position.equals(endState.position)
++          || !startState.quaternion.equals(endState.quaternion)
++          || !startState.scale.equals(endState.scale);
++        if (changed) {
++          commandStack.exec({
++            do() {
++              obj.position.copy(endState.position);
++              obj.quaternion.copy(endState.quaternion);
++              obj.scale.copy(endState.scale);
++            },
++            undo() {
++              obj.position.copy(startState.position);
++              obj.quaternion.copy(startState.quaternion);
++              obj.scale.copy(startState.scale);
++            }
++          });
++        }
++        dragState = null;
++      }
++    });
++    scene.add(transformControls);
++
++    const selection = createSelection(() => controller.getActiveCamera(), scene, domElement);
++    selection.onSelect((clickedObj) => {
++      if (!clickedObj || !sceneIndex) {
++        controller.resetTarget();
++        if (!options.disableInternalPropertyPanel) propertyPanel.hide();
++        transformControls.detach();
++        currentSelection = null;
++        options.onSelectionChange?.(null, null);
++        return;
++      }
++
++      const id = clickedObj.userData.pcfId || clickedObj.userData.REF_NO || clickedObj.name || clickedObj.uuid;
++      const item = sceneIndex.byId.get(id);
++      if (!item) return;
++
++      currentSelection = item;
++      controller.fitObject(item.object3D);
++      if (!options.disableInternalPropertyPanel) propertyPanel.show(item);
++      if (sectionBox && sectionBox.isEnabled()) sectionBox.fitToSelection(item.object3D, currentRoot);
++      if (activeToolMode === 'move' || activeToolMode === 'rotate') transformControls.attach(item.object3D);
++      if (activeToolMode === 'measure') {
++        const stats = computeBoundingMeasurement(item.object3D);
++        debugPanel?.log('measure', 'info', `W=${stats.width.toFixed(3)} H=${stats.height.toFixed(3)} D=${stats.depth.toFixed(3)} Diag=${stats.diagonal.toFixed(3)}`);
++        options.onMeasure?.(item, stats);
++      }
++      options.onSelectionChange?.(item, clickedObj);
++    });
++
++    domElement.addEventListener('pointerup', (event) => {
++      if (axesHelper && axesHelper.handleClick(event)) {
++        // view helper handled the click
++      }
++    });
++
++    createMarqueeZoom(() => controller.getActiveCamera(), scene, domElement, controller);
++
++    resizeObserver = new ResizeObserver((entries) => {
++      const rect = entries?.[0]?.contentRect;
++      const width = rect?.width || previewContainer.clientWidth;
++      const height = rect?.height || previewContainer.clientHeight;
++      if (renderer) renderer.setSize(width, height, false);
++      controller.onResize?.(width, height);
++    });
++    resizeObserver.observe(previewContainer);
++
++    const animate = () => {
++      animationId = requestAnimationFrame(animate);
++      controller.update();
++      renderer.autoClear = true;
++      renderer.render(scene, controller.getActiveCamera ? controller.getActiveCamera() : camera);
++      if (axesHelper) {
++        renderer.autoClear = false;
++        axesHelper.render(renderer);
++        renderer.autoClear = true;
++      }
++      options.onFrame?.({
++        camera: controller.getActiveCamera ? controller.getActiveCamera() : camera,
++        scene,
++        currentRoot,
++        selection: currentSelection,
++        renderer,
++      });
++    };
++    animate();
++  };
++
++  setTimeout(init, 100);
++
++  return {
++    loadGLB: async (url) => {
++      init();
++      const loader = new GLTFLoader();
++      return new Promise((resolve, reject) => {
++        loader.load(url, (gltf) => {
++          if (currentRoot) {
++            scene.remove(currentRoot);
++            disposeScene(currentRoot);
++            currentSelection = null;
++          }
++          currentRoot = gltf.scene;
++          scene.add(currentRoot);
++          sceneIndex = buildSceneIndex(currentRoot);
++          controller.fitScene(currentRoot);
++          dirLight.position.copy(camera.position);
++          debugPanel.log('system', 'info', `Loaded scene with ${sceneIndex.items.length} indexed objects`);
++
++          const propSet = new Set();
++          currentRoot.traverse(c => {
++            if (c.isMesh && c.userData) {
++              Object.keys(c.userData).forEach(k => {
++                if (k !== 'pcfId' && k !== 'pcfType') propSet.add(k);
++              });
++            }
++          });
++
++          if (toolbar) {
++            toolbar.setProperties(Array.from(propSet).sort());
++            toolbar.setHeatmapHandler((prop) => {
++              if (prop === 'default') {
++                heatmap.clearMetric();
++                toolbar.updateLegend(null);
++                return;
++              }
++              const valuesSet = new Set();
++              currentRoot.traverse(c => {
++                if (c.isMesh && c.userData && c.userData[prop] !== undefined) valuesSet.add(String(c.userData[prop]));
++              });
++              const uniqueValues = Array.from(valuesSet).sort();
++              if (!uniqueValues.length) return;
++              const colorMap = new Map();
++              uniqueValues.forEach((val, i) => {
++                const hue = i / uniqueValues.length;
++                const c = new THREE.Color().setHSL(hue, 1.0, 0.5);
++                colorMap.set(val, c.getHex());
++              });
++              heatmap.clearMetric();
++              currentRoot.traverse(child => {
++                if (child.isMesh && child.userData) {
++                  const mats = Array.isArray(child.material) ? child.material : [child.material];
++                  mats.forEach(mat => {
++                    if (!mat.userData.__baseColor) mat.userData.__baseColor = mat.color.clone();
++                    const val = String(child.userData[prop]);
++                    if (child.userData[prop] !== undefined && colorMap.has(val)) {
++                      mat.color.setHex(colorMap.get(val));
++                    } else {
++                      mat.color.set('#666666');
++                    }
++                  });
++                }
++              });
++              let html = '';
++              uniqueValues.forEach(val => {
++                const colorHex = '#' + colorMap.get(val).toString(16).padStart(6, '0');
++                html += `<div style="display:flex; align-items:center; margin-bottom:4px;"><span style="width:12px; height:12px; background:${colorHex}; display:inline-block; margin-right:6px; border:1px solid #fff;"></span><span>${val}</span></div>`;
++              });
++              toolbar.updateLegend(html);
++            });
++          }
++
++          options.onSceneLoaded?.({ scene: currentRoot, sceneIndex });
++          resolve();
++        }, undefined, reject);
++      });
++    },
++    fitAll: () => { if (currentRoot) controller.fitScene(currentRoot); },
++    home: () => { controller.resetHome(); },
++    setProjection: (mode) => { controller.setProjection?.(mode); },
++    toggleProjection: () => { controller.toggleProjection?.(); },
++    getProjectionMode: () => controller.getProjectionMode?.() || 'PERSPECTIVE',
++    getController: () => controller,
++    getCurrentSelection: () => currentSelection,
++    pickAtClient: (clientX, clientY) => {
++      if (!renderer || !currentRoot) return null;
++      const rect = domElement.getBoundingClientRect();
++      const mouse = new THREE.Vector2(
++        ((clientX - rect.left) / rect.width) * 2 - 1,
++        -((clientY - rect.top) / rect.height) * 2 + 1
++      );
++      const raycaster = new THREE.Raycaster();
++      raycaster.setFromCamera(mouse, controller.getActiveCamera());
++      const intersects = raycaster.intersectObjects(scene.children, true);
++      for (const hit of intersects) {
++        if (!hit.object || (!hit.object.isMesh && hit.object.type !== 'Mesh')) continue;
++        const resolved = resolveInspectableObject(hit.object);
++        const id = resolved?.userData?.pcfId || resolved?.userData?.REF_NO || resolved?.name || resolved?.uuid;
++        const item = sceneIndex?.byId?.get(id) ?? null;
++        return { hit, object: resolved, item };
++      }
++      return null;
++    },
++    setToolMode: (mode) => {
++      activeToolMode = mode;
++      if (!transformControls) return;
++      if (mode === 'select') {
++        transformControls.detach();
++      } else if (mode === 'move') {
++        transformControls.setMode('translate');
++        if (currentSelection) transformControls.attach(currentSelection.object3D);
++      } else if (mode === 'rotate') {
++        transformControls.setMode('rotate');
++        if (currentSelection) transformControls.attach(currentSelection.object3D);
++      } else {
++        transformControls.detach();
++      }
++    },
++    setSnapSettings: (enabled, translationSnap, rotationSnap) => {
++      if (!transformControls) return;
++      transformControls.setTranslationSnap(enabled ? translationSnap : null);
++      transformControls.setRotationSnap(enabled ? THREE.MathUtils.degToRad(rotationSnap) : null);
++    },
++    undo: () => commandStack.undo(),
++    redo: () => commandStack.redo(),
++    canUndo: () => commandStack.canUndo(),
++    canRedo: () => commandStack.canRedo(),
++    dispose: () => {
++      if (animationId) cancelAnimationFrame(animationId);
++      if (resizeObserver) resizeObserver.disconnect();
++      if (disposeRenderer) disposeRenderer();
++      if (controller) controller.dispose();
++      if (transformControls) {
++        transformControls.detach();
++        scene.remove(transformControls);
++        transformControls.dispose();
++      }
++    }
++  };
++}
+diff -ruN a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_dataStore.js b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_dataStore.js
+--- a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_dataStore.js	1970-01-01 00:00:00.000000000 +0000
++++ b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_dataStore.js	2026-04-11 07:01:32.889052152 +0000
+@@ -0,0 +1,53 @@
++// PRO2 Editor canonical datatable store.
++//
++// This module is intentionally self-contained so the second-generation editor can
++// evolve independently from the existing Pro GLB editor. The API is minimal and
++// stable: loadDataTable(), getRow(), setRowField(), onChange().
++
++const listeners = new Set();
++let table = {};
++
++export function loadDataTable(rows = []) {
++  const next = {};
++  for (const row of rows) {
++    if (!row || row.id === undefined || row.id === null) continue;
++    next[String(row.id)] = { ...row };
++  }
++  table = next;
++  listeners.forEach(fn => {
++    try { fn(); } catch (err) { console.warn('PRO2EDITOR_dataStore listener error', err); }
++  });
++}
++
++export function getRow(id) {
++  return table[String(id)];
++}
++
++export function setRowField(id, key, value) {
++  const rowId = String(id);
++  const row = table[rowId] || { id: rowId };
++  row[key] = value;
++  table[rowId] = row;
++  listeners.forEach(fn => {
++    try { fn(); } catch (err) { console.warn('PRO2EDITOR_dataStore listener error', err); }
++  });
++}
++
++export function onChange(fn) {
++  if (typeof fn !== 'function') return () => {};
++  listeners.add(fn);
++  return () => listeners.delete(fn);
++}
++
++if (typeof window !== 'undefined') {
++  window.PRO2EDITOR_DataStore = {
++    loadDataTable,
++    getRow,
++    setRowField,
++    onChange,
++  };
++}
++
++if (typeof module !== 'undefined' && module.exports) {
++  module.exports = { loadDataTable, getRow, setRowField, onChange };
++}
+diff -ruN a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_measureUtils.js b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_measureUtils.js
+--- a/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_measureUtils.js	1970-01-01 00:00:00.000000000 +0000
++++ b/viewer/js/pcf2glb/pro2-editor/core/PRO2EDITOR_measureUtils.js	2026-04-11 07:01:32.889458831 +0000
+@@ -0,0 +1,43 @@
++import { createRequire } from 'module';
++
++let THREE;
++if (typeof window !== 'undefined' && window.THREE) {
++  THREE = window.THREE;
++} else {
++  try {
++    const requireFn = createRequire(import.meta.url);
++    THREE = requireFn('three');
++  } catch (err) {
++    const requireFn = createRequire(import.meta.url);
++    THREE = requireFn('../../../../../three-stub.js');
++  }
++}
++
++export function computeBoundingMeasurement(object) {
++  const box = new THREE.Box3();
++  box.setFromObject(object);
++  if (isFinite(box.min.x) && isFinite(box.max.x)) {
++    const size = new THREE.Vector3();
++    box.getSize(size);
++    return {
++      min: box.min.clone(),
++      max: box.max.clone(),
++      width: size.x,
++      height: size.y,
++      depth: size.z,
++      diagonal: size.length(),
++    };
++  }
++  return {
++    min: new THREE.Vector3(0, 0, 0),
++    max: new THREE.Vector3(0, 0, 0),
++    width: 0,
++    height: 0,
++    depth: 0,
++    diagonal: 0,
++  };
++}
++
++if (typeof module !== 'undefined' && module.exports) {
++  module.exports = { computeBoundingMeasurement };
++}
+diff -ruN a/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_HudOverlay.js b/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_HudOverlay.js
+--- a/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_HudOverlay.js	1970-01-01 00:00:00.000000000 +0000
++++ b/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_HudOverlay.js	2026-04-11 07:01:32.889730073 +0000
+@@ -0,0 +1,54 @@
++export function createPRO2EDITOR_HudOverlay(host) {
++  const root = document.createElement('div');
++  root.className = 'pro2editor-hud-root';
++  const topStrip = document.createElement('div');
++  topStrip.className = 'pro2editor-hud-top';
++  const bottomStrip = document.createElement('div');
++  bottomStrip.className = 'pro2editor-hud-bottom';
++  const hoverCard = document.createElement('div');
++  hoverCard.className = 'pro2editor-hover-card';
++  hoverCard.style.display = 'none';
++  root.append(topStrip, bottomStrip, hoverCard);
++  host.appendChild(root);
++
++  function pill(label, value, tone = '') {
++    return `<div class="pro2editor-hud-pill ${tone}"><span class="pro2editor-hud-pill-label">${escapeHtml(label)}</span><span class="pro2editor-hud-pill-value">${escapeHtml(value ?? '—')}</span></div>`;
++  }
++
++  return {
++    setStatus(data = {}) {
++      topStrip.innerHTML = [
++        pill('Tool', data.tool || 'Select'),
++        pill('Snap', data.snap || 'Off', data.snap?.startsWith('On') ? 'ok' : 'warn'),
++        pill('Grid', data.grid || '10 mm'),
++        pill('Angle', data.angle || '15°'),
++        pill('View', data.view || 'Perspective'),
++      ].join('');
++      bottomStrip.innerHTML = [
++        pill('Selection', data.selection || 'None'),
++        pill('XYZ', data.xyz || '—'),
++        pill('FPS', data.fps != null ? String(data.fps) : '—', (data.fps || 0) >= 30 ? 'ok' : 'warn'),
++      ].join('');
++    },
++    showHover({ x = 0, y = 0, title = '', rows = [] } = {}) {
++      hoverCard.style.display = 'block';
++      hoverCard.style.left = `${x + 18}px`;
++      hoverCard.style.top = `${y + 18}px`;
++      hoverCard.innerHTML = `<div class="pro2editor-hover-title">${escapeHtml(title || 'Hover')}</div><div class="pro2editor-hover-rows">${rows.map(r => `<div class="pro2editor-hover-row"><span class="pro2editor-hover-key">${escapeHtml(r.key)}</span><span class="pro2editor-hover-val">${escapeHtml(r.value)}</span></div>`).join('')}</div>`;
++    },
++    hideHover() {
++      hoverCard.style.display = 'none';
++      hoverCard.innerHTML = '';
++    },
++    destroy() { root.remove(); }
++  };
++}
++
++function escapeHtml(value) {
++  return String(value ?? '')
++    .replace(/&/g, '&amp;')
++    .replace(/</g, '&lt;')
++    .replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;')
++    .replace(/'/g, '&#39;');
++}
+diff -ruN a/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_Panel.js b/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_Panel.js
+--- a/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_Panel.js	1970-01-01 00:00:00.000000000 +0000
++++ b/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_Panel.js	2026-04-11 07:01:32.890130943 +0000
+@@ -0,0 +1,403 @@
++import { createPRO2EDITOR_HudOverlay } from './PRO2EDITOR_HudOverlay.js';
++import { createPRO2EDITOR_ShortcutController } from './PRO2EDITOR_ShortcutController.js';
++import { createPRO2EDITOR_ViewerApp } from '../core/PRO2EDITOR_createViewerApp.js';
++import { loadMockPcfToGlbUrl, loadMockGlbUrl } from '../../pro-editor/core/mockLoader.js';
++import { getRow, onChange as onDataChange, loadDataTable } from '../core/PRO2EDITOR_dataStore.js';
++
++export function renderPRO2EDITOR_Panel(container) {
++  injectStyles();
++  loadDataTable([]);
++
++  container.innerHTML = `
++    <div id="pro2editor-root" class="pro2editor-shell">
++      <header class="pro2editor-topbar">
++        <div class="pro2editor-topbar-row pro2editor-topbar-row-main">
++          <button class="pro2editor-btn" data-action="import">Import</button>
++          <button class="pro2editor-btn" data-action="mock-pcf">PCF</button>
++          <button class="pro2editor-btn" data-action="mock-glb">GLB</button>
++          <div class="pro2editor-divider"></div>
++          <button class="pro2editor-btn" data-action="export">Export</button>
++          <button class="pro2editor-btn" data-action="undo">Undo</button>
++          <button class="pro2editor-btn" data-action="redo">Redo</button>
++          <div class="pro2editor-divider"></div>
++          <button class="pro2editor-btn active" data-action="select">Select</button>
++          <button class="pro2editor-btn" data-action="move">Move</button>
++          <button class="pro2editor-btn" data-action="rotate">Rotate</button>
++          <button class="pro2editor-btn" data-action="measure">Measure</button>
++          <button class="pro2editor-btn" data-action="break">Break</button>
++          <button class="pro2editor-btn" data-action="connect">Connect</button>
++          <button class="pro2editor-btn" data-action="stretch">Stretch</button>
++          <button class="pro2editor-btn" data-action="marquee">Marquee</button>
++          <div class="pro2editor-spacer"></div>
++          <button class="pro2editor-btn" data-action="views-menu">Views ▾</button>
++        </div>
++        <div class="pro2editor-topbar-row pro2editor-topbar-row-sub">
++          <button class="pro2editor-btn minor" data-action="toggle-projection">Ortho / Persp</button>
++          <button class="pro2editor-btn minor" data-action="home">Home</button>
++          <button class="pro2editor-btn minor" data-action="fit">Fit</button>
++          <div class="pro2editor-divider"></div>
++          <label class="pro2editor-label">Snap <input id="pro2editor-snap-toggle" type="checkbox" checked></label>
++          <label class="pro2editor-label">Grid <input id="pro2editor-grid-mm" type="number" value="100"></label>
++          <label class="pro2editor-label">Angle <input id="pro2editor-angle-deg" type="number" value="90"></label>
++        </div>
++      </header>
++
++      <section class="pro2editor-middle">
++        <aside class="pro2editor-panel pro2editor-panel-left">
++          <div class="pro2editor-tabs">
++            <button class="pro2editor-tab active" data-pane="model">Model</button>
++            <button class="pro2editor-tab" data-pane="tools">Tools</button>
++            <button class="pro2editor-tab" data-pane="annotations">Annotations</button>
++          </div>
++          <div class="pro2editor-panel-content">
++            <div class="pro2editor-pane active" data-pane="model"><div id="pro2editor-model-tree">Tree will load here…</div></div>
++            <div class="pro2editor-pane" data-pane="tools">
++              <div class="pro2editor-form-grid">
++                <label>Projection</label>
++                <select id="pro2editor-projection-select">
++                  <option value="PERSPECTIVE">Perspective</option>
++                  <option value="ORTHOGRAPHIC">Orthographic</option>
++                </select>
++                <label>FOV</label>
++                <input id="pro2editor-fov-input" type="range" min="20" max="120" step="1" value="60">
++                <label>Smooth</label>
++                <input id="pro2editor-smooth-input" type="range" min="0" max="2" step="0.05" value="0.35">
++              </div>
++            </div>
++            <div class="pro2editor-pane" data-pane="annotations"><div class="pro2editor-empty-note">Annotations will be added later.</div></div>
++          </div>
++        </aside>
++
++        <main class="pro2editor-canvas-area">
++          <div id="pro2editor-canvas-container" class="pro2editor-canvas-host"></div>
++          <div id="pro2editor-hidden-toolbar" style="display:none;"></div>
++        </main>
++
++        <aside class="pro2editor-panel pro2editor-panel-right">
++          <div class="pro2editor-tabs"><button class="pro2editor-tab active">Properties</button></div>
++          <div id="pro2editor-properties-panel" class="pro2editor-panel-content"><div class="pro2editor-empty-note">Select an object…</div></div>
++        </aside>
++      </section>
++
++      <footer class="pro2editor-footer">
++        <div class="pro2editor-debug-header">Debug Console</div>
++        <div id="pro2editor-debug-logs" class="pro2editor-debug-content"></div>
++      </footer>
++
++      <input type="file" id="pro2editor-file-input" accept=".glb,.gltf" style="display:none;">
++      <div id="pro2editor-properties-hidden" style="display:none;"></div>
++    </div>
++  `;
++
++  const root = container.querySelector('#pro2editor-root');
++  const canvasContainer = container.querySelector('#pro2editor-canvas-container');
++  const fileInput = container.querySelector('#pro2editor-file-input');
++  const hiddenToolbar = container.querySelector('#pro2editor-hidden-toolbar');
++  const propPanel = container.querySelector('#pro2editor-properties-panel');
++  const propContent = container.querySelector('#pro2editor-properties-hidden');
++  const debugLogs = container.querySelector('#pro2editor-debug-logs');
++  const snapToggle = container.querySelector('#pro2editor-snap-toggle');
++  const gridInput = container.querySelector('#pro2editor-grid-mm');
++  const angleInput = container.querySelector('#pro2editor-angle-deg');
++  const projectionSelect = container.querySelector('#pro2editor-projection-select');
++  const fovInput = container.querySelector('#pro2editor-fov-input');
++  const smoothInput = container.querySelector('#pro2editor-smooth-input');
++
++  const uiState = {
++    tool: 'select', snapEnabled: true, gridMm: 100, angleDeg: 90,
++    projection: 'PERSPECTIVE', fps: 0, selection: 'None', objectUrl: null,
++    perfHandle: 0, hoverHandle: 0, frameCounter: 0, lastPerfTs: performance.now(), destroyed: false,
++  };
++
++  const viewer = createPRO2EDITOR_ViewerApp(canvasContainer, hiddenToolbar, propPanel, propContent, debugLogs, {
++    disableInternalPropertyPanel: true,
++    onSceneLoaded: ({ sceneIndex }) => {
++      renderModelTree(sceneIndex);
++      log('INFO', 'SCENE', `Loaded ${sceneIndex?.items?.length ?? 0} indexed objects`);
++      updateHud();
++    },
++    onSelectionChange: (item) => {
++      currentSelectedItem = item;
++      uiState.selection = item?.id || item?.refNo || item?.type || 'None';
++      updateHud();
++      updatePropertyPanel();
++    },
++    onFrame: () => { uiState.frameCounter += 1; }
++  });
++
++  const hud = createPRO2EDITOR_HudOverlay(canvasContainer);
++  const shortcuts = createPRO2EDITOR_ShortcutController({ onAction: handleShortcut });
++  let currentSelectedItem = null;
++  const unsubscribeData = onDataChange(() => { if (currentSelectedItem) updatePropertyPanel(); });
++
++  wireTabs();
++  wireInputs();
++  wireToolbar();
++  wireHover();
++  startPerfLoop();
++  updateHud();
++
++  return {
++    destroy() {
++      uiState.destroyed = true;
++      if (uiState.perfHandle) cancelAnimationFrame(uiState.perfHandle);
++      if (uiState.hoverHandle) cancelAnimationFrame(uiState.hoverHandle);
++      shortcuts.destroy();
++      hud.destroy();
++      viewer.dispose();
++      if (uiState.objectUrl) URL.revokeObjectURL(uiState.objectUrl);
++      unsubscribeData?.();
++    }
++  };
++
++  function wireTabs() {
++    root.querySelectorAll('.pro2editor-tab[data-pane]').forEach(tab => {
++      tab.addEventListener('click', () => {
++        const pane = tab.dataset.pane;
++        root.querySelectorAll('.pro2editor-tab[data-pane]').forEach(t => t.classList.toggle('active', t === tab));
++        root.querySelectorAll('.pro2editor-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === pane));
++      });
++    });
++  }
++
++  function wireInputs() {
++    snapToggle.addEventListener('change', () => { uiState.snapEnabled = snapToggle.checked; syncSnaps(); });
++    gridInput.addEventListener('change', () => { uiState.gridMm = Math.max(1, Number(gridInput.value) || 100); syncSnaps(); });
++    angleInput.addEventListener('change', () => { uiState.angleDeg = Math.max(1, Number(angleInput.value) || 90); syncSnaps(); });
++    projectionSelect.addEventListener('change', () => { uiState.projection = projectionSelect.value; viewer.setProjection(uiState.projection); updateHud(); });
++    fovInput.addEventListener('input', () => { viewer.getController()?.setPerspectiveFov(Number(fovInput.value) || 60); updateHud(); });
++    smoothInput.addEventListener('input', () => { viewer.getController()?.setSmoothTime(Number(smoothInput.value) || 0.35); });
++    syncSnaps();
++  }
++
++  function wireToolbar() {
++    root.addEventListener('click', async (e) => {
++      const btn = e.target.closest('.pro2editor-btn');
++      if (!btn) return;
++      const action = btn.dataset.action;
++      if (action === 'import') { fileInput.click(); return; }
++      if (action === 'mock-pcf') {
++        btn.disabled = true; btn.textContent = 'Loading...';
++        try { const url = await loadMockPcfToGlbUrl(); await loadUrl(url); }
++        catch (err) { console.error(err); }
++        finally { btn.disabled = false; btn.textContent = 'PCF'; }
++        return;
++      }
++      if (action === 'mock-glb') {
++        btn.disabled = true; btn.textContent = 'Loading...';
++        try { const url = await loadMockGlbUrl(); await loadUrl(url); }
++        catch (err) { console.error(err); }
++        finally { btn.disabled = false; btn.textContent = 'GLB'; }
++        return;
++      }
++      if (['select','move','rotate','measure','break','connect','stretch','marquee'].includes(action)) {
++        uiState.tool = action;
++        viewer.setToolMode(action);
++        updateToolButtons();
++        updateHud();
++        if (['break','connect','stretch','marquee'].includes(action)) {
++          log('INFO', 'TOOL', `${action} tool selected (functionality pending)`);
++        }
++        return;
++      }
++      if (action === 'undo') { viewer.undo?.(); return; }
++      if (action === 'redo') { viewer.redo?.(); return; }
++      if (action === 'fit') { viewer.fitAll(); return; }
++      if (action === 'home') { viewer.home(); return; }
++      if (action === 'toggle-projection') {
++        uiState.projection = uiState.projection === 'PERSPECTIVE' ? 'ORTHOGRAPHIC' : 'PERSPECTIVE';
++        projectionSelect.value = uiState.projection;
++        viewer.setProjection(uiState.projection);
++        updateHud();
++        return;
++      }
++      log('WARN', 'UI', `${action} not yet implemented`);
++    });
++
++    fileInput.addEventListener('change', async (e) => {
++      const file = e.target.files?.[0];
++      if (!file) return;
++      if (uiState.objectUrl) URL.revokeObjectURL(uiState.objectUrl);
++      uiState.objectUrl = URL.createObjectURL(file);
++      await loadUrl(uiState.objectUrl);
++    });
++  }
++
++  async function loadUrl(url) { await viewer.loadGLB(url); viewer.fitAll(); updateHud(); }
++
++  function wireHover() {
++    canvasContainer.addEventListener('pointerleave', () => { hud.hideHover(); });
++    canvasContainer.addEventListener('pointermove', (event) => {
++      if (uiState.hoverHandle) cancelAnimationFrame(uiState.hoverHandle);
++      uiState.hoverHandle = requestAnimationFrame(() => {
++        const picked = viewer.pickAtClient?.(event.clientX, event.clientY);
++        if (!picked || !picked.hit) { hud.hideHover(); updateHud('—'); return; }
++        const point = picked.hit.point;
++        const xyz = `${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}`;
++        hud.showHover({
++          x: event.offsetX,
++          y: event.offsetY,
++          title: picked.item?.type || picked.object?.userData?.pcfType || 'Component',
++          rows: [
++            { key: 'Id', value: picked.item?.id || picked.object?.userData?.pcfId || '—' },
++            { key: 'Ref', value: picked.item?.refNo || picked.object?.userData?.REF_NO || '—' },
++            { key: 'XYZ', value: xyz },
++          ]
++        });
++        updateHud(xyz);
++      });
++    });
++  }
++
++  function handleShortcut(action) {
++    if (action === 'tool:select') { uiState.tool = 'select'; viewer.setToolMode('select'); updateToolButtons(); updateHud(); return; }
++    if (action === 'tool:move') { uiState.tool = 'move'; viewer.setToolMode('move'); updateToolButtons(); updateHud(); return; }
++    if (action === 'tool:rotate') { uiState.tool = 'rotate'; viewer.setToolMode('rotate'); updateToolButtons(); updateHud(); return; }
++    if (action === 'tool:measure') { uiState.tool = 'measure'; viewer.setToolMode('measure'); updateToolButtons(); updateHud(); return; }
++    if (action === 'tool:break') { uiState.tool = 'break'; viewer.setToolMode('break'); updateToolButtons(); updateHud(); return; }
++    if (action === 'tool:connect') { uiState.tool = 'connect'; viewer.setToolMode('connect'); updateToolButtons(); updateHud(); return; }
++    if (action === 'tool:stretch') { uiState.tool = 'stretch'; viewer.setToolMode('stretch'); updateToolButtons(); updateHud(); return; }
++    if (action === 'tool:marquee') { uiState.tool = 'marquee'; viewer.setToolMode('marquee'); updateToolButtons(); updateHud(); return; }
++    if (action === 'view:fit') { viewer.fitAll(); return; }
++    if (action === 'view:home') { viewer.home(); return; }
++    if (action === 'view:iso') { viewer.getController()?.setPresetView('ISO'); updateHud(); return; }
++    if (action === 'view:ortho') { uiState.projection = 'ORTHOGRAPHIC'; projectionSelect.value = uiState.projection; viewer.setProjection(uiState.projection); updateHud(); return; }
++    if (action === 'view:persp') { uiState.projection = 'PERSPECTIVE'; projectionSelect.value = uiState.projection; viewer.setProjection(uiState.projection); updateHud(); return; }
++    if (action === 'view:top') { viewer.getController()?.setPresetView('TOP'); updateHud(); return; }
++    if (action === 'view:front') { viewer.getController()?.setPresetView('FRONT'); updateHud(); return; }
++    if (action === 'view:back') { viewer.getController()?.setPresetView('BACK'); updateHud(); return; }
++    if (action === 'view:left') { viewer.getController()?.setPresetView('LEFT'); updateHud(); return; }
++    if (action === 'view:right') { viewer.getController()?.setPresetView('RIGHT'); updateHud(); return; }
++    if (action === 'view:bottom') { viewer.getController()?.setPresetView('BOTTOM'); updateHud(); return; }
++    if (action === 'toggle:snap') { uiState.snapEnabled = !uiState.snapEnabled; snapToggle.checked = uiState.snapEnabled; syncSnaps(); return; }
++    if (action === 'history:undo') { viewer.undo?.(); return; }
++    if (action === 'history:redo') { viewer.redo?.(); return; }
++  }
++
++  function syncSnaps() { viewer.setSnapSettings(uiState.snapEnabled, uiState.gridMm, uiState.angleDeg); updateHud(); }
++
++  function updateToolButtons() {
++    root.querySelectorAll('.pro2editor-btn[data-action="select"], .pro2editor-btn[data-action="move"], .pro2editor-btn[data-action="rotate"], .pro2editor-btn[data-action="measure"], .pro2editor-btn[data-action="break"], .pro2editor-btn[data-action="connect"], .pro2editor-btn[data-action="stretch"], .pro2editor-btn[data-action="marquee"]').forEach(btn => {
++      btn.classList.toggle('active', btn.dataset.action === uiState.tool);
++    });
++  }
++
++  function renderModelTree(sceneIndex) {
++    const tree = root.querySelector('#pro2editor-model-tree');
++    const items = sceneIndex?.items || [];
++    tree.innerHTML = items.length
++      ? items.slice(0, 60).map(item => `<div class="tree-row">${item.type} <span>${item.id || item.refNo || '—'}</span></div>`).join('')
++      : '<div class="pro2editor-empty-note">No indexed items.</div>';
++  }
++
++  function startPerfLoop() {
++    function tick(ts) {
++      if (uiState.destroyed) return;
++      const dt = ts - uiState.lastPerfTs;
++      if (dt >= 500) {
++        uiState.fps = Math.round((uiState.frameCounter * 1000) / dt);
++        uiState.frameCounter = 0;
++        uiState.lastPerfTs = ts;
++        updateHud();
++      }
++      uiState.perfHandle = requestAnimationFrame(tick);
++    }
++    uiState.perfHandle = requestAnimationFrame(tick);
++  }
++
++  function updateHud(xyz = '—') {
++    const controller = viewer.getController?.();
++    const preset = controller?.getPresetView?.() || 'ISO';
++    const projection = viewer.getProjectionMode?.() || uiState.projection;
++    hud.setStatus({
++      tool: uiState.tool,
++      snap: uiState.snapEnabled ? `On · ${uiState.gridMm}mm` : 'Off',
++      grid: `${uiState.gridMm}mm`,
++      angle: `${uiState.angleDeg}°`,
++      view: `${projection === 'ORTHOGRAPHIC' ? 'Ortho' : 'Persp'} · ${preset}`,
++      selection: uiState.selection,
++      xyz,
++      fps: uiState.fps,
++    });
++  }
++
++  function updatePropertyPanel() {
++    if (!propPanel) return;
++    if (!currentSelectedItem) {
++      propPanel.innerHTML = '<div class="pro2editor-empty-note">Select an object…</div>';
++      return;
++    }
++    const id = currentSelectedItem.id || currentSelectedItem.refNo || currentSelectedItem.type;
++    const row = id != null ? getRow(id) : undefined;
++    if (!row) {
++      propPanel.innerHTML = `<div class="pro2editor-empty-note">No data for ${escapeHtml(id)}</div>`;
++      return;
++    }
++    const entries = Object.entries(row).filter(([k]) => k !== 'id');
++    let rowsHtml = '';
++    for (const [key, value] of entries) {
++      rowsHtml += `<tr><td style="padding:3px 4px;border-bottom:1px solid #2a2a3a;color:#889aaa;width:45%;word-break:break-word;">${escapeHtml(key)}</td><td style="padding:3px 4px;border-bottom:1px solid #2a2a3a;color:#e0e0e0;word-break:break-word;">${escapeHtml(String(value))}</td></tr>`;
++    }
++    const title = escapeHtml(String(id));
++    propPanel.innerHTML = `<div style="font-size:12px;font-weight:bold;color:#cce;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #334;">${title}</div><table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:11px;"><tbody>${rowsHtml}</tbody></table>`;
++  }
++
++  function escapeHtml(s) {
++    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
++  }
++
++  function log(level, channel, message) {
++    const row = document.createElement('div');
++    row.className = 'pro2editor-log-row';
++    row.innerHTML = `<span>[${level}]</span> <span>[${channel}]</span> <span>${message}</span>`;
++    debugLogs.prepend(row);
++  }
++}
++
++function injectStyles() {
++  if (document.getElementById('pro2editor-styles')) return;
++  const style = document.createElement('style');
++  style.id = 'pro2editor-styles';
++  style.textContent = `
++    .pro2editor-shell{display:flex;flex-direction:column;height:calc(100vh - 120px);background:#0f151c;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif}
++    .pro2editor-topbar{display:flex;flex-direction:column;background:#1e293b;border-bottom:1px solid #334155}
++    .pro2editor-topbar-row{display:flex;align-items:center;padding:0 12px;height:40px;gap:8px}
++    .pro2editor-topbar-row-sub{height:32px;background:#151e2b;border-top:1px solid #283548;font-size:12px}
++    .pro2editor-btn{background:transparent;border:1px solid transparent;color:#cbd5e1;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px}
++    .pro2editor-btn:hover{background:#334155}
++    .pro2editor-btn.active{background:#2563eb;color:#fff}
++    .pro2editor-divider{width:1px;height:16px;background:#334155;margin:0 4px}
++    .pro2editor-spacer{flex:1}
++    .pro2editor-label{display:flex;align-items:center;gap:4px;color:#94a3b8}
++    .pro2editor-middle{display:flex;flex:1;min-height:0}
++    .pro2editor-panel{width:300px;background:#1e293b;display:flex;flex-direction:column;border-right:1px solid #334155}
++    .pro2editor-panel-right{border-right:none;border-left:1px solid #334155}
++    .pro2editor-tabs{display:flex;background:#0f151c;border-bottom:1px solid #334155}
++    .pro2editor-tab{flex:1;background:transparent;border:none;color:#94a3b8;padding:8px 0;cursor:pointer;border-bottom:2px solid transparent}
++    .pro2editor-tab.active{color:#fff;border-bottom-color:#3b82f6}
++    .pro2editor-panel-content{flex:1;overflow:auto;position:relative}
++    .pro2editor-pane{display:none;padding:12px}
++    .pro2editor-pane.active{display:block}
++    .pro2editor-canvas-area{flex:1;position:relative;background:#000}
++    .pro2editor-canvas-host{position:absolute;inset:0}
++    .pro2editor-footer{height:180px;background:#1e293b;border-top:1px solid #334155;display:flex;flex-direction:column}
++    .pro2editor-debug-header{padding:4px 12px;font-size:12px;color:#94a3b8;border-bottom:1px solid #334155;background:#0f151c}
++    .pro2editor-debug-content{flex:1;overflow:auto;padding:8px 12px;font-family:monospace;font-size:11px;color:#a7f3d0}
++    .tree-row{padding:4px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,0.05)}
++    .tree-row span{color:#94a3b8;margin-left:6px}
++    .pro2editor-form-grid{display:grid;grid-template-columns:90px 1fr;gap:10px 12px;align-items:center}
++    .pro2editor-form-grid input,.pro2editor-form-grid select{width:100%;box-sizing:border-box;background:#0f151c;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px}
++    .pro2editor-empty-note{padding:12px;font-size:12px;color:#9fb3c8}
++    .pro2editor-hud-root{position:absolute;inset:0;pointer-events:none;z-index:10}
++    .pro2editor-hud-top,.pro2editor-hud-bottom{position:absolute;left:12px;display:flex;gap:8px;flex-wrap:wrap}
++    .pro2editor-hud-top{top:12px}
++    .pro2editor-hud-bottom{bottom:12px}
++    .pro2editor-hud-pill{display:flex;gap:8px;padding:7px 11px;border:1px solid rgba(255,255,255,0.1);border-radius:999px;background:rgba(10,14,20,0.88)}
++    .pro2editor-hud-pill-label{color:#8ea5bf;font-size:11px;text-transform:uppercase}
++    .pro2editor-hud-pill-value{color:#edf4fc;font-size:12px;font-weight:700}
++    .pro2editor-hover-card{position:absolute;min-width:220px;max-width:320px;padding:10px 12px;border-radius:8px;background:rgba(8,12,18,0.92);border:1px solid rgba(255,255,255,0.12);color:#eaf1fa}
++    .pro2editor-hover-title{font-size:14px;font-weight:700;margin-bottom:8px}
++    .pro2editor-hover-row{display:grid;grid-template-columns:54px 1fr;gap:10px;padding:4px 0;font-size:12px}
++  `;
++  document.head.appendChild(style);
++}
+diff -ruN a/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_ShortcutController.js b/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_ShortcutController.js
+--- a/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_ShortcutController.js	1970-01-01 00:00:00.000000000 +0000
++++ b/viewer/js/pcf2glb/pro2-editor/ui/PRO2EDITOR_ShortcutController.js	2026-04-11 07:01:32.889844735 +0000
+@@ -0,0 +1,67 @@
++export function createPRO2EDITOR_ShortcutController({ onAction, enabled = true }) {
++  const keymap = new Map([
++    ['1', 'tool:select'],
++    ['2', 'tool:move'],
++    ['3', 'tool:rotate'],
++    ['4', 'tool:measure'],
++    ['5', 'tool:break'],
++    ['6', 'tool:connect'],
++    ['7', 'tool:stretch'],
++    ['8', 'tool:marquee'],
++    ['w', 'tool:move'],
++    ['e', 'tool:rotate'],
++    ['m', 'tool:measure'],
++    ['b', 'tool:break'],
++    ['c', 'tool:connect'],
++    ['s', 'tool:stretch'],
++    ['q', 'tool:marquee'],
++    ['f', 'view:fit'],
++    ['h', 'view:home'],
++    ['i', 'view:iso'],
++    ['o', 'view:ortho'],
++    ['p', 'view:persp'],
++    ['g', 'toggle:snap'],
++    ['delete', 'selection:delete'],
++    ['escape', 'tool:cancel'],
++  ]);
++
++  function onKeyDown(event) {
++    if (!enabled) return;
++    if (shouldIgnore(event.target)) return;
++    const key = String(event.key || '').toLowerCase();
++    if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
++      event.preventDefault();
++      onAction?.('history:undo', event);
++      return;
++    }
++    if ((event.ctrlKey || event.metaKey) && ((key === 'y') || (key === 'z' && event.shiftKey))) {
++      event.preventDefault();
++      onAction?.('history:redo', event);
++      return;
++    }
++    if (event.shiftKey && key === 't') { event.preventDefault(); onAction?.('view:top', event); return; }
++    if (event.shiftKey && key === 'f') { event.preventDefault(); onAction?.('view:front', event); return; }
++    if (event.shiftKey && key === 'b') { event.preventDefault(); onAction?.('view:back', event); return; }
++    if (event.shiftKey && key === 'l') { event.preventDefault(); onAction?.('view:left', event); return; }
++    if (event.shiftKey && key === 'r') { event.preventDefault(); onAction?.('view:right', event); return; }
++    if (event.shiftKey && key === 'd') { event.preventDefault(); onAction?.('view:bottom', event); return; }
++    const action = keymap.get(key);
++    if (!action) return;
++    event.preventDefault();
++    onAction?.(action, event);
++  }
++
++  window.addEventListener('keydown', onKeyDown);
++  return {
++    setEnabled(value) { enabled = !!value; },
++    destroy() { window.removeEventListener('keydown', onKeyDown); }
++  };
++}
++
++function shouldIgnore(target) {
++  if (!target) return false;
++  const tag = String(target.tagName || '').toLowerCase();
++  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
++  if (target.isContentEditable) return true;
++  return false;
++}
