@@ -1,0 +1,42 @@
+{
+  "metadata": {
+    "calcId": "mc-bdliquid",
+    "title": "Bursting Disc Liquid source data",
+    "saveTarget": "public/misc-calc-source-data/bursting-disc-liquid.json"
+  },
+  "tables": {
+    "deviceSize": [
+      {
+        "deviceSize": "",
+        "burstArea_mm2": null,
+        "nominalDiameter_mm": null,
+        "notes": "Populate from workbook"
+      }
+    ],
+    "coefficients": [
+      {
+        "name": "Cd",
+        "value": null,
+        "unit": "-",
+        "notes": "Populate from workbook"
+      }
+    ],
+    "correctionFactors": [
+      {
+        "name": "Kc",
+        "value": null,
+        "unit": "-",
+        "notes": "Populate from workbook"
+      }
+    ],
+    "benchmarkCases": [
+      {
+        "caseId": "default-placeholder",
+        "enabled": false,
+        "inputs": {},
+        "expected": {},
+        "tolerancePct": 1.0
+      }
+    ]
+  }
+}

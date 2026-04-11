@@ -1,0 +1,39 @@
+{
+  "metadata": {
+    "calcId": "mc-blast",
+    "title": "Blast source data",
+    "saveTarget": "public/misc-calc-source-data/blast.json"
+  },
+  "tables": {
+    "caseFactors": [
+      {
+        "caseName": "",
+        "factor": null,
+        "notes": "Populate from workbook"
+      }
+    ],
+    "pressureCoefficients": [
+      {
+        "coefficientName": "Cp",
+        "value": null,
+        "notes": "Populate from workbook"
+      }
+    ],
+    "dragFactors": [
+      {
+        "dragName": "Cd",
+        "value": null,
+        "notes": "Populate from workbook"
+      }
+    ],
+    "benchmarkCases": [
+      {
+        "caseId": "default-placeholder",
+        "enabled": false,
+        "inputs": {},
+        "expected": {},
+        "tolerancePct": 1.0
+      }
+    ]
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "calcId": "mc-flange-check",
+    "title": "Flange Check source data",
+    "saveTarget": "public/misc-calc-source-data/flange-check.json"
+  },
+  "tables": {
+    "runtimeAllowables": [
+      {
+        "material": "",
+        "temp_degF": null,
+        "pressureAllowable_ksi": null,
+        "notes": "Populate missing NC allowable rows here"
+      }
+    ],
+    "forceAllowables": [
+      {
+        "method": "NC",
+        "nps": null,
+        "rating": null,
+        "axialAllowable_N": null,
+        "notes": "Populate once real workbook tables are transcribed"
+      }
+    ],
+    "momentAllowables": [
+      {
+        "method": "NC",
+        "nps": null,
+        "rating": null,
+        "momentAllowable_Nmm": null,
+        "notes": "Populate once real workbook tables are transcribed"
+      }
+    ],
+    "benchmarkCases": [
+      {
+        "caseId": "default-placeholder",
+        "enabled": false,
+        "inputs": {},
+        "expected": {},
+        "tolerancePct": 1.0
+      }
+    ]
+  }
+}
