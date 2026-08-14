@@ -177,3 +177,35 @@ Preserve known-good source identities, exact data literals, independent evidence
 - Do not modify workflow files unless explicitly authorized.
 - Keep the PR handover-ready while waiting for review/merge.
 - **Never merge without explicit owner authorization.**
+
+## 11. AUTO MODE — autonomous phase execution
+
+The exact owner keyword `AUTO MODE` sets:
+
+```text
+EXECUTION_MODE = AUTO
+AUTO_STATE = RUNNING
+SCOPE_AUTHORITY = LOCKED_TO_APPROVED_MISSION
+PHASE_PROGRESSION = AUTO
+MERGE_AUTHORITY = OWNER_ONLY
+```
+
+AUTO MODE authorizes automatic progression through the approved source/data/calculation plan without routine phase confirmation. It does not authorize scope expansion, source/provenance invention, authority promotion, formula/methodology changes beyond approved scope, weakening validation, destructive actions, or merge.
+
+After each phase the agent must validate source/provenance and implementation evidence, synchronize the work report/status/claims/Appendix A as needed, create a durable checkpoint, evaluate hard stops, and continue automatically when none applies.
+
+In addition to universal hard stops, stop AUTO when continuing requires an unapproved change to formula/correlation authority, controlled-source identity, coefficient/limit interpretation, units/applicability, workbook publication authority, master/reference data authority, or downstream engineering-output semantics.
+
+Workbook parity alone is never sufficient reason to continue through a controlled-source contradiction.
+
+If repeated attempts do not narrow uncertainty, or the agent cannot state a concrete hypothesis, falsifier, next source/provenance check, and protected invariants, stop mutation and set:
+
+```text
+PR_RECOVERY_STATE = TAKEOVER_REQUIRED
+TAKEOVER_AUTHORITY = READ_ONLY
+AUTO_STATE = TAKEOVER_REQUIRED
+```
+
+Refresh the work report and Appendix A for immediate takeover.
+
+`AUTO MODE` never implies `AUTO MERGE`; merge remains owner-only unless separately and explicitly authorized.
